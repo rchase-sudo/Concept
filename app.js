@@ -9,8 +9,8 @@
 //   1. Auth screen (sign in / sign up) until there's a session.
 //   2. Workspace: optional reference upload (image or PDF) + prompt.
 //   3. On "Generate": upload file -> insert `generations` row -> invoke
-//      the `generate-concept` edge function -> poll `check-status` every
-//      3s until status is "complete" or "failed".
+//      the `generate-concept` edge function -> result comes back directly
+//      in the function response (synchronous, no polling needed).
 //   4. History grid of past generations, with a detail modal.
 
 (() => {
@@ -23,20 +23,18 @@
     authSuccess: "",
     authBusy: false,
 
-    sourceFile: null, // File
-    sourcePreviewUrl: null, // data URL for the file-pin thumb
-    sourceKind: null, // "image" | "pdf"
+    sourceFile: null,         // File
+    sourcePreviewUrl: null,   // data URL for the file-pin thumb
+    sourceKind: null,         // "image" | "pdf"
 
     generating: false,
     errorMessage: "",
-    currentGeneration: null, // row from `generations`
-    resultImageUrl: null, // signed URL for the current result
+    currentGeneration: null,  // row from `generations`
+    resultImageUrl: null,     // public/signed URL for the current result
 
     history: [],
     historyLoading: true,
     modalGeneration: null,
-
-    pollTimer: null,
   };
 
   // ---------------------------------------------------------------
@@ -58,12 +56,16 @@
 
   function statusLabel(status) {
     return {
-      pending: "Queued",
+      pending:   "Queued",
       analyzing: "Analyzing reference",
       rendering: "Rendering concept",
-      complete: "Complete",
-      failed: "Failed",
+      completed: "Complete",
+      failed:    "Failed",
     }[status] || status;
+  }
+
+  function isTerminal(status) {
+    return status === "completed" || status === "failed";
   }
 
   function slugify(str) {
@@ -71,13 +73,6 @@
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "") || "concept";
-  }
-
-  function clearPolling() {
-    if (state.pollTimer) {
-      clearInterval(state.pollTimer);
-      state.pollTimer = null;
-    }
   }
 
   function blobToDataURL(blob) {
@@ -92,7 +87,7 @@
   function loadImageDims(dataUrl) {
     return new Promise((resolve, reject) => {
       const img = new Image();
-      img.onload = () => resolve(img);
+      img.onload  = () => resolve(img);
       img.onerror = reject;
       img.src = dataUrl;
     });
@@ -112,10 +107,10 @@
   }
 
   async function downloadAsPdf(url, title) {
-    const resp = await fetch(url);
-    const blob = await resp.blob();
+    const resp    = await fetch(url);
+    const blob    = await resp.blob();
     const dataUrl = await blobToDataURL(blob);
-    const img = await loadImageDims(dataUrl);
+    const img     = await loadImageDims(dataUrl);
     const { jsPDF } = window.jspdf;
     const pdf = new jsPDF({
       orientation: img.width >= img.height ? "landscape" : "portrait",
@@ -127,13 +122,13 @@
   }
 
   async function pdfFirstPageThumb(file) {
-    const buf = await file.arrayBuffer();
-    const doc = await pdfjsLib.getDocument({ data: buf }).promise;
-    const page = await doc.getPage(1);
+    const buf      = await file.arrayBuffer();
+    const doc      = await pdfjsLib.getDocument({ data: buf }).promise;
+    const page     = await doc.getPage(1);
     const viewport = page.getViewport({ scale: 0.4 });
-    const canvas = document.createElement("canvas");
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
+    const canvas   = document.createElement("canvas");
+    canvas.width   = viewport.width;
+    canvas.height  = viewport.height;
     await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
     return canvas.toDataURL("image/png");
   }
@@ -172,7 +167,7 @@
             ? "Sign up to start turning floor plans and sketches into rendered concepts."
             : "Sign in to pick up where you left off."}</p>
 
-          ${state.authError ? `<div class="auth-error">${escapeHtml(state.authError)}</div>` : ""}
+          ${state.authError   ? `<div class="auth-error">${escapeHtml(state.authError)}</div>`     : ""}
           ${state.authSuccess ? `<div class="auth-success">${escapeHtml(state.authSuccess)}</div>` : ""}
 
           <form id="auth-form">
@@ -182,10 +177,14 @@
             </div>
             <div class="field">
               <label for="auth-password">Password</label>
-              <input id="auth-password" type="password" autocomplete="${isSignUp ? "new-password" : "current-password"}" minlength="6" required />
+              <input id="auth-password" type="password"
+                autocomplete="${isSignUp ? "new-password" : "current-password"}"
+                minlength="6" required />
             </div>
             <button type="submit" class="btn btn-primary auth-submit" ${state.authBusy ? "disabled" : ""}>
-              ${state.authBusy ? `<span class="spin"></span> Please wait` : (isSignUp ? "Sign up" : "Sign in")}
+              ${state.authBusy
+                ? `<span class="spin"></span> Please wait`
+                : (isSignUp ? "Sign up" : "Sign in")}
             </button>
           </form>
 
@@ -226,19 +225,18 @@
 
   function renderStatusStrip() {
     const gen = state.currentGeneration;
-    if (!gen) return "";
-    const failed = gen.status === "failed";
+    if (!gen || isTerminal(gen.status)) return "";
     return `
-      <div class="status-strip ${failed ? "failed" : ""}">
+      <div class="status-strip">
         <span class="status-dot"></span>
         <span class="status-tag">${gen.status.toUpperCase()}</span>
-        <span class="status-text">${failed ? escapeHtml(gen.error_message || "Generation failed") : statusLabel(gen.status)}</span>
+        <span class="status-text">${statusLabel(gen.status)}</span>
       </div>`;
   }
 
   function renderResultPanel() {
     const gen = state.currentGeneration;
-    if (!gen || gen.status !== "complete" || !state.resultImageUrl) return "";
+    if (!gen || gen.status !== "completed" || !state.resultImageUrl) return "";
     return `
       <div class="result-panel">
         <div class="result-head">
@@ -257,9 +255,11 @@
   }
 
   function renderHistoryCard(item) {
-    const pillClass = ["complete", "failed"].includes(item.status) ? item.status : "pending";
-    const thumb = item.signedUrl
-      ? `<img src="${item.signedUrl}" alt="" />`
+    const pillClass = item.status === "completed" ? "complete"
+                    : item.status === "failed"    ? "failed"
+                    : "pending";
+    const thumb = item.result_url || item.signedUrl
+      ? `<img src="${item.result_url || item.signedUrl}" alt="" />`
       : `<span class="spin"></span>`;
     return `
       <div class="history-card" data-action="open-history" data-id="${item.id}">
@@ -300,7 +300,9 @@
           <p class="workspace-sub">Upload a floor plan, sketch, or site photo, describe what you're imagining, and get back a rendered concept image.</p>
         </div>
 
-        ${state.errorMessage ? `<div class="auth-error" style="margin-bottom:20px;">${escapeHtml(state.errorMessage)}</div>` : ""}
+        ${state.errorMessage
+          ? `<div class="auth-error" style="margin-bottom:20px;">${escapeHtml(state.errorMessage)}</div>`
+          : ""}
 
         <div class="generator-grid">
           <div class="panel">
@@ -328,21 +330,26 @@
   function renderModal() {
     const gen = state.modalGeneration;
     if (!gen) return "";
+    const imgUrl = gen.result_url || gen.signedUrl || null;
     return `
       <div class="modal-backdrop" data-action="close-modal">
         <div class="modal-card" data-role="modal-card">
           <div style="position:relative;">
             <button class="btn btn-ghost modal-close" data-action="close-modal">&times;</button>
             <div class="result-frame" style="border:none; border-radius:0;">
-              ${gen.signedUrl
-                ? `<img src="${gen.signedUrl}" alt="" />`
-                : `<div class="empty-state">${gen.status === "failed" ? escapeHtml(gen.error_message || "Generation failed") : "Still rendering…"}</div>`}
+              ${imgUrl
+                ? `<img src="${imgUrl}" alt="" />`
+                : `<div class="empty-state">${
+                    gen.status === "failed"
+                      ? escapeHtml(gen.error_message || "Generation failed")
+                      : "Still rendering…"
+                  }</div>`}
             </div>
             <div style="padding:20px;">
               <div class="result-title" style="margin-bottom:8px;">${escapeHtml(gen.title || "Untitled Concept")}</div>
               <div class="date" style="margin-bottom:14px;">${formatDate(gen.created_at)}</div>
               <div class="char-hint" style="white-space:normal; line-height:1.5;">${escapeHtml(gen.prompt)}</div>
-              ${gen.signedUrl ? `
+              ${imgUrl ? `
                 <div class="result-actions" style="padding:18px 0 0; border-top:none;">
                   <button class="btn btn-primary" data-action="modal-download-png">Download PNG</button>
                   <button class="btn" data-action="modal-download-pdf">Download PDF</button>
@@ -390,7 +397,7 @@
     }
 
     const promptBox = root.querySelector(".prompt-box");
-    const charHint = root.querySelector('[data-role="char-hint"]');
+    const charHint  = root.querySelector('[data-role="char-hint"]');
     if (promptBox && charHint) {
       promptBox.addEventListener("input", () => {
         charHint.textContent = `${promptBox.value.length} characters`;
@@ -406,21 +413,21 @@
     const handlers = {
       "toggle-auth-mode": () => {
         state.authMode = state.authMode === "signin" ? "signup" : "signin";
-        state.authError = "";
+        state.authError   = "";
         state.authSuccess = "";
         render();
       },
       "sign-out": async () => { await sb.auth.signOut(); },
       "remove-file": () => {
-        state.sourceFile = null;
+        state.sourceFile       = null;
         state.sourcePreviewUrl = null;
-        state.sourceKind = null;
+        state.sourceKind       = null;
         render();
       },
       "generate": handleGenerate,
       "dismiss-result": () => {
         state.currentGeneration = null;
-        state.resultImageUrl = null;
+        state.resultImageUrl    = null;
         render();
       },
       "download-png": () => {
@@ -435,18 +442,20 @@
       },
       "refresh-history": refreshHistory,
       "open-history": () => {
-        const id = e.currentTarget.dataset.id;
+        const id   = e.currentTarget.dataset.id;
         const item = state.history.find((h) => h.id === id);
         if (item) { state.modalGeneration = item; render(); }
       },
       "close-modal": () => { state.modalGeneration = null; render(); },
       "modal-download-png": () => {
-        const gen = state.modalGeneration;
-        if (gen?.signedUrl) downloadFromUrl(gen.signedUrl, `${slugify(gen.title)}.png`);
+        const gen    = state.modalGeneration;
+        const imgUrl = gen?.result_url || gen?.signedUrl;
+        if (imgUrl) downloadFromUrl(imgUrl, `${slugify(gen.title)}.png`);
       },
       "modal-download-pdf": () => {
-        const gen = state.modalGeneration;
-        if (gen?.signedUrl) downloadAsPdf(gen.signedUrl, gen.title);
+        const gen    = state.modalGeneration;
+        const imgUrl = gen?.result_url || gen?.signedUrl;
+        if (imgUrl) downloadAsPdf(imgUrl, gen.title);
       },
     };
     if (handlers[action]) handlers[action]();
@@ -454,10 +463,10 @@
 
   async function onAuthSubmit(e) {
     e.preventDefault();
-    const email = root.querySelector("#auth-email").value.trim();
+    const email    = root.querySelector("#auth-email").value.trim();
     const password = root.querySelector("#auth-password").value;
-    state.authBusy = true;
-    state.authError = "";
+    state.authBusy    = true;
+    state.authError   = "";
     state.authSuccess = "";
     render();
 
@@ -467,7 +476,7 @@
         if (error) throw error;
         if (!data.session) {
           state.authSuccess = "Check your email to confirm your account, then sign in.";
-          state.authMode = "signin";
+          state.authMode    = "signin";
         }
       } else {
         const { error } = await sb.auth.signInWithPassword({ email, password });
@@ -483,15 +492,15 @@
 
   async function handleFileSelected(file) {
     const isImage = file.type.startsWith("image/");
-    const isPdf = file.type === "application/pdf";
+    const isPdf   = file.type === "application/pdf";
     if (!isImage && !isPdf) {
       state.errorMessage = "Please choose an image or a PDF file.";
       render();
       return;
     }
     state.errorMessage = "";
-    state.sourceFile = file;
-    state.sourceKind = isPdf ? "pdf" : "image";
+    state.sourceFile   = file;
+    state.sourceKind   = isPdf ? "pdf" : "image";
     try {
       state.sourcePreviewUrl = isPdf ? await pdfFirstPageThumb(file) : await blobToDataURL(file);
     } catch (err) {
@@ -502,7 +511,7 @@
   }
 
   async function handleGenerate() {
-    const promptBox = root.querySelector(".prompt-box");
+    const promptBox  = root.querySelector(".prompt-box");
     const promptText = promptBox ? promptBox.value.trim() : "";
     if (!promptText) {
       state.errorMessage = "Please describe the concept you want to generate.";
@@ -510,18 +519,20 @@
       return;
     }
 
-    state.generating = true;
-    state.errorMessage = "";
+    state.generating    = true;
+    state.errorMessage  = "";
     state.resultImageUrl = null;
     render();
 
     try {
-      const user = state.session.user;
-      let sourcePath = null;
+      const user       = state.session.user;
+      let sourcePath   = null;
       const sourceKind = state.sourceKind;
 
+      // Upload reference file if provided
       if (state.sourceFile) {
-        const ext = (state.sourceFile.name.split(".").pop() || (sourceKind === "pdf" ? "pdf" : "png")).toLowerCase();
+        const ext = (state.sourceFile.name.split(".").pop() ||
+          (sourceKind === "pdf" ? "pdf" : "png")).toLowerCase();
         sourcePath = `${user.id}/${Date.now()}-${crypto.randomUUID()}.${ext}`;
         const { error: upErr } = await sb.storage
           .from("uploads")
@@ -529,60 +540,69 @@
         if (upErr) throw new Error(`Upload failed: ${upErr.message}`);
       }
 
+      // Insert generation row
       const { data: gen, error: insErr } = await sb
         .from("generations")
-        .insert({ user_id: user.id, prompt: promptText, source_path: sourcePath, source_kind: sourceKind, status: "pending" })
+        .insert({
+          user_id:     user.id,
+          prompt:      promptText,
+          source_path: sourcePath,
+          source_kind: sourceKind,
+          status:      "pending",
+        })
         .select()
         .single();
       if (insErr) throw new Error(`Could not create generation: ${insErr.message}`);
 
       state.currentGeneration = gen;
-      state.sourceFile = null;
-      state.sourcePreviewUrl = null;
-      state.sourceKind = null;
+      state.sourceFile        = null;
+      state.sourcePreviewUrl  = null;
+      state.sourceKind        = null;
       render();
 
-      const { error: fnErr } = await sb.functions.invoke("generate-concept", { body: { generation_id: gen.id } });
+      // Invoke edge function — synchronous, returns result_url directly
+      const { data: fnData, error: fnErr } = await sb.functions.invoke("generate-concept", {
+        body: { generation_id: gen.id },
+      });
       if (fnErr) throw new Error(fnErr.message || "Failed to start generation");
+      if (!fnData?.ok) throw new Error(fnData?.error || "Generation failed");
 
-      startPolling(gen.id);
+      // Pull the completed row from DB to get title + final status
+      const { data: completed } = await sb
+        .from("generations")
+        .select("*")
+        .eq("id", gen.id)
+        .single();
+
+      state.currentGeneration = completed || gen;
+      state.resultImageUrl    = fnData.result_url || null;
+      state.generating        = false;
+
       refreshHistory();
+      render();
     } catch (err) {
       console.error(err);
       state.errorMessage = err.message || "Something went wrong.";
-      state.generating = false;
+      state.generating   = false;
+
+      // Mark the row as failed if we have an id
+      if (state.currentGeneration?.id) {
+        const { data: failed } = await sb
+          .from("generations")
+          .select("*")
+          .eq("id", state.currentGeneration.id)
+          .single();
+        if (failed) state.currentGeneration = failed;
+      }
+
       render();
     }
-  }
-
-  function startPolling(generationId) {
-    clearPolling();
-    state.pollTimer = setInterval(async () => {
-      try {
-        const { data, error } = await sb.functions.invoke("check-status", { body: { generation_id: generationId } });
-        if (error) throw error;
-        const gen = data.generation;
-        state.currentGeneration = gen;
-
-        if (gen.status === "complete" || gen.status === "failed") {
-          clearPolling();
-          state.generating = false;
-          if (gen.status === "complete" && gen.output_path) {
-            const { data: signed } = await sb.storage.from("outputs").createSignedUrl(gen.output_path, 3600);
-            state.resultImageUrl = signed?.signedUrl || null;
-          }
-          refreshHistory();
-        }
-        render();
-      } catch (err) {
-        console.error("Polling error:", err);
-      }
-    }, 3000);
   }
 
   async function refreshHistory() {
     const user = state.session?.user;
     if (!user) return;
+
     const { data, error } = await sb
       .from("generations")
       .select("*")
@@ -597,25 +617,20 @@
       return;
     }
 
+    // result_url is stored directly on the row — no signed URL needed.
+    // For legacy rows that only have output_path, fall back to a signed URL.
     const items = data || [];
     await Promise.all(items.map(async (item) => {
-      if (item.status === "complete" && item.output_path) {
-        const { data: signed } = await sb.storage.from("outputs").createSignedUrl(item.output_path, 3600);
+      if (!item.result_url && item.status === "completed" && item.output_path) {
+        const { data: signed } = await sb.storage
+          .from("uploads")
+          .createSignedUrl(item.output_path, 3600);
         item.signedUrl = signed?.signedUrl || null;
       }
     }));
 
-    state.history = items;
+    state.history        = items;
     state.historyLoading = false;
-
-    // Resume polling if something was left mid-flight (e.g. after a refresh).
-    const active = items.find((i) => ["pending", "analyzing", "rendering"].includes(i.status));
-    if (active && !state.pollTimer) {
-      state.currentGeneration = active;
-      state.generating = true;
-      startPolling(active.id);
-    }
-
     render();
   }
 
@@ -632,11 +647,10 @@
     sb.auth.onAuthStateChange((_event, session) => {
       state.session = session;
       if (!session) {
-        clearPolling();
-        state.history = [];
-        state.historyLoading = true;
+        state.history           = [];
+        state.historyLoading    = true;
         state.currentGeneration = null;
-        state.resultImageUrl = null;
+        state.resultImageUrl    = null;
       }
       render();
       if (session) refreshHistory();
