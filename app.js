@@ -1,40 +1,28 @@
 // app.js
-//
-// Frontend logic for the "Drafted" concept generator. Renders everything
-// into the <div id="root"> left empty by concept.html, using `sb`
-// (the Supabase client) and `pdfjsLib` / `window.jspdf` already set up
-// by the inline <script> block in that file.
-//
-// Flow:
-//   1. Auth screen (sign in / sign up) until there's a session.
-//   2. Workspace: optional reference upload (image or PDF) + prompt.
-//   3. On "Generate": upload file -> insert `generations` row -> invoke
-//      the `generate-concept` edge function -> result comes back directly
-//      in the function response (synchronous, no polling needed).
-//   4. History grid of past generations, with a detail modal.
-
 (() => {
   const root = document.getElementById("root");
 
   const state = {
     session: null,
-    authMode: "signin", // "signin" | "signup"
+    authMode: "signin",
     authError: "",
     authSuccess: "",
     authBusy: false,
 
-    sourceFile: null,         // File
-    sourcePreviewUrl: null,   // data URL for the file-pin thumb
-    sourceKind: null,         // "image" | "pdf"
+    sourceFile: null,
+    sourcePreviewUrl: null,
+    sourceKind: null,
 
     generating: false,
     errorMessage: "",
-    currentGeneration: null,  // row from `generations`
-    resultImageUrl: null,     // public/signed URL for the current result
+    currentGeneration: null,
+    resultImageUrl: null,
 
     history: [],
     historyLoading: true,
     modalGeneration: null,
+
+    _pollInterval: null, // internal polling handle
   };
 
   // ---------------------------------------------------------------
@@ -131,6 +119,53 @@
     canvas.height  = viewport.height;
     await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
     return canvas.toDataURL("image/png");
+  }
+
+  // ---------------------------------------------------------------
+  // Polling
+  // ---------------------------------------------------------------
+
+  function stopPolling() {
+    if (state._pollInterval) {
+      clearInterval(state._pollInterval);
+      state._pollInterval = null;
+    }
+  }
+
+  function startPolling(generationId) {
+    stopPolling();
+    // Poll every 3 seconds
+    state._pollInterval = setInterval(async () => {
+      try {
+        const { data, error } = await sb
+          .from("generations")
+          .select("*")
+          .eq("id", generationId)
+          .single();
+
+        if (error || !data) return;
+
+        state.currentGeneration = data;
+
+        if (data.status === "completed") {
+          stopPolling();
+          state.generating     = false;
+          state.resultImageUrl = data.result_url || null;
+          refreshHistory();
+          render();
+        } else if (data.status === "failed") {
+          stopPolling();
+          state.generating   = false;
+          state.errorMessage = data.error_message || "Generation failed.";
+          render();
+        } else {
+          // Still in progress — just re-render the status strip
+          render();
+        }
+      } catch (e) {
+        console.error("Poll error:", e);
+      }
+    }, 3000);
   }
 
   // ---------------------------------------------------------------
@@ -417,7 +452,10 @@
         state.authSuccess = "";
         render();
       },
-      "sign-out": async () => { await sb.auth.signOut(); },
+      "sign-out": async () => {
+        stopPolling();
+        await sb.auth.signOut();
+      },
       "remove-file": () => {
         state.sourceFile       = null;
         state.sourcePreviewUrl = null;
@@ -519,8 +557,8 @@
       return;
     }
 
-    state.generating    = true;
-    state.errorMessage  = "";
+    state.generating     = true;
+    state.errorMessage   = "";
     state.resultImageUrl = null;
     render();
 
@@ -560,41 +598,24 @@
       state.sourceKind        = null;
       render();
 
-      // Invoke edge function — synchronous, returns result_url directly
-      const { data: fnData, error: fnErr } = await sb.functions.invoke("generate-concept", {
+      // ✅ Start polling BEFORE invoking the function so we never miss the completion
+      startPolling(gen.id);
+
+      // Fire-and-forget the edge function — don't await the result
+      // The function can take 60-180s; polling handles the completion
+      sb.functions.invoke("generate-concept", {
         body: { generation_id: gen.id },
+      }).catch((err) => {
+        // If the invoke itself errors (e.g. network timeout), polling will
+        // catch the failed status from the DB, so just log here
+        console.warn("Edge function invoke error (polling will handle):", err.message);
       });
-      if (fnErr) throw new Error(fnErr.message || "Failed to start generation");
-      if (!fnData?.ok) throw new Error(fnData?.error || "Generation failed");
 
-      // Pull the completed row from DB to get title + final status
-      const { data: completed } = await sb
-        .from("generations")
-        .select("*")
-        .eq("id", gen.id)
-        .single();
-
-      state.currentGeneration = completed || gen;
-      state.resultImageUrl    = fnData.result_url || null;
-      state.generating        = false;
-
-      refreshHistory();
-      render();
     } catch (err) {
       console.error(err);
+      stopPolling();
       state.errorMessage = err.message || "Something went wrong.";
       state.generating   = false;
-
-      // Mark the row as failed if we have an id
-      if (state.currentGeneration?.id) {
-        const { data: failed } = await sb
-          .from("generations")
-          .select("*")
-          .eq("id", state.currentGeneration.id)
-          .single();
-        if (failed) state.currentGeneration = failed;
-      }
-
       render();
     }
   }
@@ -617,8 +638,6 @@
       return;
     }
 
-    // result_url is stored directly on the row — no signed URL needed.
-    // For legacy rows that only have output_path, fall back to a signed URL.
     const items = data || [];
     await Promise.all(items.map(async (item) => {
       if (!item.result_url && item.status === "completed" && item.output_path) {
@@ -647,6 +666,7 @@
     sb.auth.onAuthStateChange((_event, session) => {
       state.session = session;
       if (!session) {
+        stopPolling();
         state.history           = [];
         state.historyLoading    = true;
         state.currentGeneration = null;
