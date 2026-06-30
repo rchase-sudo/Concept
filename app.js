@@ -121,6 +121,28 @@
     return canvas.toDataURL("image/png");
   }
 
+  // ✅ NEW: renders the PDF's first page at a much higher resolution than the
+  // small preview thumb, and returns it as a PNG Blob — this is what actually
+  // gets uploaded and sent to Claude/Gemini, since neither API can read raw
+  // PDF bytes as an "image". Converting client-side avoids needing a PDF
+  // library inside the Deno edge function.
+  async function pdfFirstPageToImageBlob(file, scale = 2.5) {
+    const buf      = await file.arrayBuffer();
+    const doc      = await pdfjsLib.getDocument({ data: buf }).promise;
+    const page     = await doc.getPage(1);
+    const viewport = page.getViewport({ scale });
+    const canvas   = document.createElement("canvas");
+    canvas.width   = viewport.width;
+    canvas.height  = viewport.height;
+    await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error("Failed to render PDF page to image"));
+      }, "image/png");
+    });
+  }
+
   // ---------------------------------------------------------------
   // Polling — always the source of truth for completion
   // ---------------------------------------------------------------
@@ -581,12 +603,28 @@
       const sourceKind = state.sourceKind;
 
       if (state.sourceFile) {
-        const ext = (state.sourceFile.name.split(".").pop() ||
-          (sourceKind === "pdf" ? "pdf" : "png")).toLowerCase();
-        sourcePath = `${user.id}/${Date.now()}-${crypto.randomUUID()}.${ext}`;
+        let uploadBlob = state.sourceFile;
+        let uploadExt  = (state.sourceFile.name.split(".").pop() || "png").toLowerCase();
+        let uploadType = state.sourceFile.type || undefined;
+
+        // ✅ FIX: PDFs can't be read directly by Claude/Gemini's image inputs —
+        // render the first page to a PNG client-side and upload that instead.
+        // source_kind stays "pdf" in the DB so the UI still shows the right
+        // badge, but the actual stored bytes are always a valid image now.
+        if (sourceKind === "pdf") {
+          try {
+            uploadBlob = await pdfFirstPageToImageBlob(state.sourceFile);
+            uploadExt  = "png";
+            uploadType = "image/png";
+          } catch (pdfErr) {
+            throw new Error(`Could not convert PDF to image: ${pdfErr.message}`);
+          }
+        }
+
+        sourcePath = `${user.id}/${Date.now()}-${crypto.randomUUID()}.${uploadExt}`;
         const { error: upErr } = await sb.storage
           .from("uploads")
-          .upload(sourcePath, state.sourceFile, { contentType: state.sourceFile.type || undefined });
+          .upload(sourcePath, uploadBlob, { contentType: uploadType });
         if (upErr) throw new Error(`Upload failed: ${upErr.message}`);
       }
 
