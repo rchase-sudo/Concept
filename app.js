@@ -765,19 +765,34 @@
 
   async function init() {
     const { data } = await sb.auth.getSession();
-    state.session = data.session || null;
-
-    // ✅ NEW: gate access before doing anything else with the workspace
+    let sessionCandidate = data.session || null;
+  
+    // ✅ FIX: getSession() only reads the cached/local session — it does NOT
+    // confirm with the server that it's still valid. A stale/expired session
+    // sitting in localStorage was forcing an immediate redirect to Upgrade
+    // before the login form ever got a chance to render. Validate against
+    // the server with getUser() before gating on it; if it's bad, clear it
+    // and fall through to the normal login screen instead of redirecting.
+    if (sessionCandidate) {
+      const { data: userData, error: userErr } = await sb.auth.getUser();
+      if (userErr || !userData?.user) {
+        console.warn("Stale session detected on load — clearing it so login shows.");
+        await sb.auth.signOut();
+        sessionCandidate = null;
+      }
+    }
+  
+    state.session = sessionCandidate;
+  
+    // Gate access before doing anything else with the workspace — only
+    // reached now if we have a session that's actually still valid.
     if (state.session) {
       await checkPaidStatusAndRoute(state.session);
-      // If checkPaidStatusAndRoute redirected away, the code below never
-      // matters since the page is navigating away. If it returned without
-      // redirecting, the user is confirmed paid and we continue normally.
     }
-
+  
     render();
     if (state.session) refreshHistory();
-
+  
     sb.auth.onAuthStateChange((_event, session) => {
       state.session = session;
       if (!session) {
@@ -790,8 +805,6 @@
       render();
       if (session) {
         refreshHistory();
-        // ✅ NEW: re-check on every sign-in event too (e.g. right after
-        // signup/signin submit, not just on page load)
         checkPaidStatusAndRoute(session);
       }
     });
