@@ -22,7 +22,7 @@
     historyLoading: true,
     modalGeneration: null,
 
-    _pollInterval: null, // internal polling handle
+    _pollInterval: null,
   };
 
   // ---------------------------------------------------------------
@@ -122,7 +122,7 @@
   }
 
   // ---------------------------------------------------------------
-  // Polling
+  // Polling — always the source of truth for completion
   // ---------------------------------------------------------------
 
   function stopPolling() {
@@ -134,7 +134,6 @@
 
   function startPolling(generationId) {
     stopPolling();
-    // Poll every 3 seconds
     state._pollInterval = setInterval(async () => {
       try {
         const { data, error } = await sb
@@ -159,7 +158,7 @@
           state.errorMessage = data.error_message || "Generation failed.";
           render();
         } else {
-          // Still in progress — just re-render the status strip
+          // still in progress, update status strip
           render();
         }
       } catch (e) {
@@ -567,7 +566,6 @@
       let sourcePath   = null;
       const sourceKind = state.sourceKind;
 
-      // Upload reference file if provided
       if (state.sourceFile) {
         const ext = (state.sourceFile.name.split(".").pop() ||
           (sourceKind === "pdf" ? "pdf" : "png")).toLowerCase();
@@ -578,7 +576,6 @@
         if (upErr) throw new Error(`Upload failed: ${upErr.message}`);
       }
 
-      // Insert generation row
       const { data: gen, error: insErr } = await sb
         .from("generations")
         .insert({
@@ -596,19 +593,34 @@
       state.sourceFile        = null;
       state.sourcePreviewUrl  = null;
       state.sourceKind        = null;
+
+      // Start polling immediately so we always catch completion regardless of
+      // whether the invoke call resolves, times out, or errors
+      startPolling(gen.id);
       render();
 
-      // ✅ Start polling BEFORE invoking the function so we never miss the completion
-      startPolling(gen.id);
-
-      // Fire-and-forget the edge function — don't await the result
-      // The function can take 60-180s; polling handles the completion
+      // Invoke the edge function — we don't await the result because it may
+      // take longer than the browser's fetch timeout. Polling handles completion.
+      // We still call it so the function starts; errors here are non-fatal.
       sb.functions.invoke("generate-concept", {
         body: { generation_id: gen.id },
+      }).then((result) => {
+        // If invoke resolves AND returns a completed result, apply it immediately
+        // (avoids waiting for the next poll tick)
+        if (result?.data?.ok && result?.data?.result_url) {
+          stopPolling();
+          state.generating     = false;
+          state.resultImageUrl = result.data.result_url;
+          // Re-fetch the full row to get title etc.
+          sb.from("generations").select("*").eq("id", gen.id).single().then(({ data }) => {
+            if (data) state.currentGeneration = data;
+            refreshHistory();
+            render();
+          });
+        }
       }).catch((err) => {
-        // If the invoke itself errors (e.g. network timeout), polling will
-        // catch the failed status from the DB, so just log here
-        console.warn("Edge function invoke error (polling will handle):", err.message);
+        // Invoke timed out or network error — polling will handle it, just log
+        console.warn("Invoke finished with error (polling continues):", err?.message);
       });
 
     } catch (err) {
