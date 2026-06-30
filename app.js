@@ -735,7 +735,7 @@
 
   // ✅ NEW: where to send paid vs unpaid users after they're confirmed
   // signed in. Adjust these to your actual page paths/URLs.
-  const PAID_REDIRECT_URL   = "/app.html";       // page A — full product
+  const PAID_REDIRECT_URL   = "/index.html";       // page A — full product
   const UNPAID_REDIRECT_URL = "/upgrade.html";   // page B — paywall / upsell
 
   async function checkPaidStatusAndRoute(session) {
