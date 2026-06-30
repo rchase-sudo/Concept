@@ -654,9 +654,12 @@
     const items = data || [];
     await Promise.all(items.map(async (item) => {
       if (item.status === "completed" && item.output_path) {
-        const { data: signed } = await sb.storage
+        const { data: signed, error: signErr } = await sb.storage
           .from("outputs")
           .createSignedUrl(item.output_path, 3600);
+        if (signErr) {
+          console.error("History signed URL failed for", item.id, ":", signErr.message, "path:", item.output_path);
+        }
         item.signedUrl = signed?.signedUrl || null;
       }
     }));
