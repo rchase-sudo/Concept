@@ -153,9 +153,12 @@
           // ✅ FIX: there is no result_url column — resolve a signed URL
           // from output_path instead, same pattern as refreshHistory()
           if (data.output_path) {
-            const { data: signed } = await sb.storage
-              .from("uploads")
+            const { data: signed, error: signErr } = await sb.storage
+              .from("outputs")
               .createSignedUrl(data.output_path, 3600);
+            if (signErr) {
+              console.error("Failed to create signed URL:", signErr.message, "bucket: outputs, path:", data.output_path);
+            }
             state.resultImageUrl = signed?.signedUrl || null;
           } else {
             state.resultImageUrl = null;
@@ -652,7 +655,7 @@
     await Promise.all(items.map(async (item) => {
       if (item.status === "completed" && item.output_path) {
         const { data: signed } = await sb.storage
-          .from("uploads")
+          .from("outputs")
           .createSignedUrl(item.output_path, 3600);
         item.signedUrl = signed?.signedUrl || null;
       }
