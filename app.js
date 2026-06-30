@@ -148,8 +148,19 @@
 
         if (data.status === "completed") {
           stopPolling();
-          state.generating     = false;
-          state.resultImageUrl = data.result_url || null;
+          state.generating = false;
+
+          // ✅ FIX: there is no result_url column — resolve a signed URL
+          // from output_path instead, same pattern as refreshHistory()
+          if (data.output_path) {
+            const { data: signed } = await sb.storage
+              .from("uploads")
+              .createSignedUrl(data.output_path, 3600);
+            state.resultImageUrl = signed?.signedUrl || null;
+          } else {
+            state.resultImageUrl = null;
+          }
+
           refreshHistory();
           render();
         } else if (data.status === "failed") {
@@ -600,24 +611,11 @@
       render();
 
       // Invoke the edge function — we don't await the result because it may
-      // take longer than the browser's fetch timeout. Polling handles completion.
-      // We still call it so the function starts; errors here are non-fatal.
+      // take longer than the browser's fetch timeout. Polling handles completion
+      // and resolves the signed URL from output_path, so we don't need to do
+      // anything special here even if invoke resolves fast.
       sb.functions.invoke("generate-concept", {
         body: { generation_id: gen.id },
-      }).then((result) => {
-        // If invoke resolves AND returns a completed result, apply it immediately
-        // (avoids waiting for the next poll tick)
-        if (result?.data?.ok && result?.data?.result_url) {
-          stopPolling();
-          state.generating     = false;
-          state.resultImageUrl = result.data.result_url;
-          // Re-fetch the full row to get title etc.
-          sb.from("generations").select("*").eq("id", gen.id).single().then(({ data }) => {
-            if (data) state.currentGeneration = data;
-            refreshHistory();
-            render();
-          });
-        }
       }).catch((err) => {
         // Invoke timed out or network error — polling will handle it, just log
         console.warn("Invoke finished with error (polling continues):", err?.message);
@@ -652,7 +650,7 @@
 
     const items = data || [];
     await Promise.all(items.map(async (item) => {
-      if (!item.result_url && item.status === "completed" && item.output_path) {
+      if (item.status === "completed" && item.output_path) {
         const { data: signed } = await sb.storage
           .from("uploads")
           .createSignedUrl(item.output_path, 3600);
