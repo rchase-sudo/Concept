@@ -733,9 +733,48 @@
   // Boot
   // ---------------------------------------------------------------
 
+  // ✅ NEW: where to send paid vs unpaid users after they're confirmed
+  // signed in. Adjust these to your actual page paths/URLs.
+  const PAID_REDIRECT_URL   = "/app.html";       // page A — full product
+  const UNPAID_REDIRECT_URL = "/upgrade.html";   // page B — paywall / upsell
+
+  async function checkPaidStatusAndRoute(session) {
+    if (!session) return;
+
+    const { data: profile, error } = await sb
+      .from("profiles")
+      .select("is_paid")
+      .eq("id", session.user.id)
+      .single();
+
+    if (error) {
+      console.error("Could not load profile/paid status:", error.message);
+      // Fail closed: if we can't confirm paid status, don't let them through
+      window.location.href = UNPAID_REDIRECT_URL;
+      return;
+    }
+
+    if (profile?.is_paid) {
+      // Already on the right page (this app.js lives on the paid page) —
+      // no redirect needed, just let the normal render() flow continue.
+      return;
+    }
+
+    window.location.href = UNPAID_REDIRECT_URL;
+  }
+
   async function init() {
     const { data } = await sb.auth.getSession();
     state.session = data.session || null;
+
+    // ✅ NEW: gate access before doing anything else with the workspace
+    if (state.session) {
+      await checkPaidStatusAndRoute(state.session);
+      // If checkPaidStatusAndRoute redirected away, the code below never
+      // matters since the page is navigating away. If it returned without
+      // redirecting, the user is confirmed paid and we continue normally.
+    }
+
     render();
     if (state.session) refreshHistory();
 
@@ -749,7 +788,12 @@
         state.resultImageUrl    = null;
       }
       render();
-      if (session) refreshHistory();
+      if (session) {
+        refreshHistory();
+        // ✅ NEW: re-check on every sign-in event too (e.g. right after
+        // signup/signin submit, not just on page load)
+        checkPaidStatusAndRoute(session);
+      }
     });
   }
 
