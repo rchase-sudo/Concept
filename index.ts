@@ -27,40 +27,15 @@ Deno.serve(async (req) => {
     const { generation_id } = await req.json();
     if (!generation_id) return jsonError("Missing generation_id", 400);
 
-    // ✅ Return 202 immediately so the client isn't waiting on an HTTP connection
-    // The actual work runs in the background via EdgeRuntime.waitUntil()
-    const responsePromise = processGeneration(generation_id);
-    // @ts-ignore — EdgeRuntime is available in Supabase edge runtime
-    EdgeRuntime.waitUntil(responsePromise);
+    const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
-    return new Response(
-      JSON.stringify({ ok: true, queued: true, generation_id }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
-
-  } catch (e) {
-    console.error("Handler error:", e);
-    return jsonError(e instanceof Error ? e.message : "Unknown error", 500);
-  }
-});
-
-// ---------------------------------------------------------------
-// All the real work happens here, decoupled from the HTTP response
-// ---------------------------------------------------------------
-async function processGeneration(generation_id: string): Promise<void> {
-  const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
-
-  try {
     const { data: gen, error: genErr } = await supabase
       .from("generations")
       .select("*")
       .eq("id", generation_id)
       .single();
 
-    if (genErr || !gen) {
-      console.error("Generation not found:", genErr?.message);
-      return;
-    }
+    if (genErr || !gen) return jsonError("Generation not found", 404);
 
     await supabase.from("generations").update({ status: "analyzing" }).eq("id", generation_id);
 
@@ -71,10 +46,9 @@ async function processGeneration(generation_id: string): Promise<void> {
       const { data: signed, error: signErr } = await supabase.storage
         .from("uploads")
         .createSignedUrl(gen.source_path, 60 * 30);
-
       if (signErr) {
         await failGeneration(supabase, generation_id, `Could not access source file: ${signErr.message}`);
-        return;
+        return jsonError(signErr.message, 500);
       }
 
       const imgResp = await fetch(signed.signedUrl);
@@ -110,7 +84,7 @@ async function processGeneration(generation_id: string): Promise<void> {
 
     if (uploadErr) {
       await failGeneration(supabase, generation_id, `Upload failed: ${uploadErr.message}`);
-      return;
+      return jsonError(uploadErr.message, 500);
     }
 
     const { data: publicUrl } = supabase.storage.from("uploads").getPublicUrl(outputPath);
@@ -122,15 +96,15 @@ async function processGeneration(generation_id: string): Promise<void> {
 
     console.log("Generation completed:", generation_id);
 
+    return new Response(JSON.stringify({ ok: true, result_url: publicUrl.publicUrl }), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+
   } catch (e) {
-    console.error("processGeneration error:", e);
-    await failGeneration(
-      createClient(SUPABASE_URL, SERVICE_ROLE_KEY),
-      generation_id,
-      e instanceof Error ? e.message : "Unknown error"
-    );
+    console.error("Top-level error:", e);
+    return jsonError(e instanceof Error ? e.message : "Unknown error", 500);
   }
-}
+});
 
 async function refineWithClaude(
   userPrompt: string,
@@ -249,10 +223,7 @@ async function generateWithGemini(
   });
 
   if (!imagePart) {
-    console.error(
-      "No image part found. Full response (trimmed):",
-      JSON.stringify(data).slice(0, 800)
-    );
+    console.error("No image part found. Full response (trimmed):", JSON.stringify(data).slice(0, 800));
     throw new Error(
       `Gemini returned no image part. Finish reason: ${data?.candidates?.[0]?.finishReason ?? "unknown"}`
     );
