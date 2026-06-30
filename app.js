@@ -736,7 +736,7 @@
   // ✅ NEW: where to send paid vs unpaid users after they're confirmed
   // signed in. Adjust these to your actual page paths/URLs.
   const PAID_REDIRECT_URL   = "rchase-sudo.github.io/Concept/index.html";       // page A — full product
-  const UNPAID_REDIRECT_URL = "rchase-sudo.github.io/Concept/upgrade.html";   // page B — paywall / upsell
+  const UNPAID_REDIRECT_URL = "rchase-sudo.github.io/Upgrade/upgrade.html";   // page B — paywall / upsell
 
   async function checkPaidStatusAndRoute(session) {
     if (!session) return;
