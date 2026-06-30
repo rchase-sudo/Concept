@@ -617,8 +617,30 @@
       // take longer than the browser's fetch timeout. Polling handles completion
       // and resolves the signed URL from output_path, so we don't need to do
       // anything special here even if invoke resolves fast.
-      sb.functions.invoke("generate-concept", {
-        body: { generation_id: gen.id },
+      //
+      // ✅ FIX: explicitly grab a fresh session before invoking. sb.functions.invoke
+      // normally auto-attaches the auth header, but if the token is mid-refresh
+      // or briefly stale, the call can go out with no Authorization header at all,
+      // causing an intermittent UNAUTHORIZED_NO_AUTH_HEADER error.
+      const { data: freshSession } = await sb.auth.getSession();
+      const accessToken = freshSession?.session?.access_token;
+
+      const invokeGenerate = (token) =>
+        sb.functions.invoke("generate-concept", {
+          body: { generation_id: gen.id },
+          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        });
+
+      invokeGenerate(accessToken).then((result) => {
+        const errMsg = result?.error?.message || "";
+        if (errMsg.includes("UNAUTHORIZED_NO_AUTH_HEADER") || errMsg.includes("Missing authorization")) {
+          console.warn("Auth header missing on first attempt — refreshing session and retrying once");
+          return sb.auth.refreshSession().then(({ data: refreshed }) => {
+            const retryToken = refreshed?.session?.access_token;
+            return invokeGenerate(retryToken);
+          });
+        }
+        return result;
       }).catch((err) => {
         // Invoke timed out or network error — polling will handle it, just log
         console.warn("Invoke finished with error (polling continues):", err?.message);
