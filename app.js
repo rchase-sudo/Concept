@@ -13,6 +13,14 @@
     sourcePreviewUrl: null,
     sourceKind: null,
 
+    // ✅ NEW: the prompt textarea is now state-backed instead of DOM-only.
+    // Previously its typed content lived nowhere except the live <textarea>
+    // node, so ANY re-render (a poll tick, a background auth token refresh,
+    // etc.) would silently wipe it since the template had no bound value.
+    // Storing it here means a re-render always redraws whatever was last
+    // typed, no matter what triggered the render.
+    promptText: "",
+
     generating: false,
     errorMessage: "",
     currentGeneration: null,
@@ -121,11 +129,6 @@
     return canvas.toDataURL("image/png");
   }
 
-  // ✅ NEW: renders the PDF's first page at a much higher resolution than the
-  // small preview thumb, and returns it as a PNG Blob — this is what actually
-  // gets uploaded and sent to Claude/Gemini, since neither API can read raw
-  // PDF bytes as an "image". Converting client-side avoids needing a PDF
-  // library inside the Deno edge function.
   async function pdfFirstPageToImageBlob(file, scale = 2.5) {
     const buf      = await file.arrayBuffer();
     const doc      = await pdfjsLib.getDocument({ data: buf }).promise;
@@ -172,8 +175,6 @@
           stopPolling();
           state.generating = false;
 
-          // ✅ FIX: there is no result_url column — resolve a signed URL
-          // from output_path instead, same pattern as refreshHistory()
           if (data.output_path) {
             const { data: signed, error: signErr } = await sb.storage
               .from("outputs")
@@ -381,9 +382,9 @@
           </div>
           <div class="panel">
             <div class="panel-label">Describe the concept</div>
-            <textarea class="prompt-box" placeholder="e.g. A warm, modern kitchen renovation with white oak cabinetry, a large island, and soft pendant lighting over the counter."></textarea>
+            <textarea class="prompt-box" placeholder="e.g. A warm, modern kitchen renovation with white oak cabinetry, a large island, and soft pendant lighting over the counter.">${escapeHtml(state.promptText)}</textarea>
             <div class="generate-row">
-              <span class="char-hint" data-role="char-hint">0 characters</span>
+              <span class="char-hint" data-role="char-hint">${state.promptText.length} characters</span>
               <button class="btn btn-primary" data-action="generate" ${state.generating ? "disabled" : ""}>
                 ${state.generating ? `<span class="spin"></span> Generating` : "Generate concept"}
               </button>
@@ -466,10 +467,14 @@
       });
     }
 
+    // ✅ FIX: the textarea is now state-backed. Every keystroke updates
+    // state.promptText, so any later render() (poll tick, auth event, etc.)
+    // redraws the textarea with what was actually typed instead of blank.
     const promptBox = root.querySelector(".prompt-box");
     const charHint  = root.querySelector('[data-role="char-hint"]');
     if (promptBox && charHint) {
       promptBox.addEventListener("input", () => {
+        state.promptText = promptBox.value;
         charHint.textContent = `${promptBox.value.length} characters`;
       });
     }
@@ -584,8 +589,13 @@
   }
 
   async function handleGenerate() {
-    const promptBox  = root.querySelector(".prompt-box");
-    const promptText = promptBox ? promptBox.value.trim() : "";
+    // ✅ FIX: read from state.promptText (kept in sync on every keystroke)
+    // rather than querying the DOM textarea directly. Functionally this was
+    // already safe against the render-wipe bug since it captured the value
+    // before any render() call — but sourcing from the same state the
+    // template renders from removes any doubt and keeps a single source of
+    // truth.
+    const promptText = state.promptText.trim();
     if (!promptText) {
       state.errorMessage = "Please describe the concept you want to generate.";
       render();
@@ -607,10 +617,6 @@
         let uploadExt  = (state.sourceFile.name.split(".").pop() || "png").toLowerCase();
         let uploadType = state.sourceFile.type || undefined;
 
-        // ✅ FIX: PDFs can't be read directly by Claude/Gemini's image inputs —
-        // render the first page to a PNG client-side and upload that instead.
-        // source_kind stays "pdf" in the DB so the UI still shows the right
-        // badge, but the actual stored bytes are always a valid image now.
         if (sourceKind === "pdf") {
           try {
             uploadBlob = await pdfFirstPageToImageBlob(state.sourceFile);
@@ -645,21 +651,16 @@
       state.sourceFile        = null;
       state.sourcePreviewUrl  = null;
       state.sourceKind        = null;
+      // ✅ NEW: clear the prompt intentionally now that the generation has
+      // actually been created — previously this only ever appeared to
+      // happen (as a side-effect of the render-wipe bug), so it could fire
+      // before the value was captured. Now it's explicit and only happens
+      // after a successful insert.
+      state.promptText        = "";
 
-      // Start polling immediately so we always catch completion regardless of
-      // whether the invoke call resolves, times out, or errors
       startPolling(gen.id);
       render();
 
-      // Invoke the edge function — we don't await the result because it may
-      // take longer than the browser's fetch timeout. Polling handles completion
-      // and resolves the signed URL from output_path, so we don't need to do
-      // anything special here even if invoke resolves fast.
-      //
-      // ✅ FIX: explicitly grab a fresh session before invoking. sb.functions.invoke
-      // normally auto-attaches the auth header, but if the token is mid-refresh
-      // or briefly stale, the call can go out with no Authorization header at all,
-      // causing an intermittent UNAUTHORIZED_NO_AUTH_HEADER error.
       const { data: freshSession } = await sb.auth.getSession();
       const accessToken = freshSession?.session?.access_token;
 
@@ -680,7 +681,6 @@
         }
         return result;
       }).catch((err) => {
-        // Invoke timed out or network error — polling will handle it, just log
         console.warn("Invoke finished with error (polling continues):", err?.message);
       });
 
@@ -733,8 +733,6 @@
   // Boot
   // ---------------------------------------------------------------
 
-  // ✅ NEW: where to send paid vs unpaid users after they're confirmed
-  // signed in. Adjust these to your actual page paths/URLs.
   const PAID_REDIRECT_URL   = "https://rchase-sudo.github.io/Concept/";
   const UNPAID_REDIRECT_URL = "https://rchase-sudo.github.io/Upgrade/";
 
@@ -749,14 +747,11 @@
 
     if (error) {
       console.error("Could not load profile/paid status:", error.message);
-      // Fail closed: if we can't confirm paid status, don't let them through
       window.location.href = UNPAID_REDIRECT_URL;
       return;
     }
 
     if (profile?.is_paid) {
-      // Already on the right page (this app.js lives on the paid page) —
-      // no redirect needed, just let the normal render() flow continue.
       return;
     }
 
@@ -766,13 +761,7 @@
   async function init() {
     const { data } = await sb.auth.getSession();
     let sessionCandidate = data.session || null;
-  
-    // ✅ FIX: getSession() only reads the cached/local session — it does NOT
-    // confirm with the server that it's still valid. A stale/expired session
-    // sitting in localStorage was forcing an immediate redirect to Upgrade
-    // before the login form ever got a chance to render. Validate against
-    // the server with getUser() before gating on it; if it's bad, clear it
-    // and fall through to the normal login screen instead of redirecting.
+
     if (sessionCandidate) {
       const { data: userData, error: userErr } = await sb.auth.getUser();
       if (userErr || !userData?.user) {
@@ -781,20 +770,36 @@
         sessionCandidate = null;
       }
     }
-  
+
     state.session = sessionCandidate;
-  
-    // Gate access before doing anything else with the workspace — only
-    // reached now if we have a session that's actually still valid.
+
     if (state.session) {
       await checkPaidStatusAndRoute(state.session);
     }
-  
+
     render();
     if (state.session) refreshHistory();
-  
-    sb.auth.onAuthStateChange((_event, session) => {
+
+    // ✅ FIX: this is the actual root cause of the reported bug. Supabase
+    // silently refreshes the access token on a timer AND on tab/window
+    // focus. Previously, ANY event here — including routine, invisible
+    // "TOKEN_REFRESHED" events — triggered a full render() that rebuilt
+    // #root from scratch, wiping the uncontrolled prompt textarea and
+    // re-running the paid-status redirect check. In practice: type a
+    // prompt, tab away and back (or just wait), and the whole workspace
+    // silently rebuilds itself under you.
+    //
+    // Only SIGNED_IN / SIGNED_OUT (and USER_UPDATED, in case profile data
+    // changes) actually need a rebuild + redirect check. TOKEN_REFRESHED
+    // still needs state.session updated (so subsequent Supabase calls use
+    // the fresh token) but must NOT touch the DOM or re-run redirect logic.
+    sb.auth.onAuthStateChange((event, session) => {
       state.session = session;
+
+      if (event === "TOKEN_REFRESHED") {
+        return; // session object updated silently, UI stays untouched
+      }
+
       if (!session) {
         stopPolling();
         state.history           = [];
