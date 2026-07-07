@@ -476,6 +476,7 @@
       promptBox.addEventListener("input", () => {
         state.promptText = promptBox.value;
         charHint.textContent = `${promptBox.value.length} characters`;
+        console.log("[diag] input event fired, state.promptText now:", JSON.stringify(state.promptText));
       });
     }
 
@@ -595,8 +596,10 @@
     // before any render() call — but sourcing from the same state the
     // template renders from removes any doubt and keeps a single source of
     // truth.
+    console.log("[diag] Generate clicked. state.promptText:", JSON.stringify(state.promptText));
     const promptText = state.promptText.trim();
     if (!promptText) {
+      console.log("[diag] Guard blocked submission — promptText was empty/whitespace at click time.");
       state.errorMessage = "Please describe the concept you want to generate.";
       render();
       return;
@@ -816,4 +819,16 @@
   }
 
   init();
+
+  // ✅ DIAGNOSTIC: definitively answers "is this a real page reload, or just
+  // a DOM rebuild that feels like one?" A real navigation logs "unloading"
+  // right before the page goes blank, and a fresh page load logs "fresh
+  // load" — if you see "fresh load" in the console after clicking Generate,
+  // it's an actual browser-level reload, not a render() call, which points
+  // to something entirely different (e.g. a stray form submission, a
+  // location.href assignment, or a link/anchor swallowing the click).
+  window.addEventListener("beforeunload", () => {
+    console.log("[diag] ACTUAL PAGE UNLOAD DETECTED — this is a real browser navigation, not a DOM re-render.");
+  });
+  console.log("[diag] fresh load —", performance.getEntriesByType("navigation")[0]?.type || "unknown nav type");
 })();
