@@ -374,8 +374,8 @@
       <main class="workspace">
         <div class="workspace-head">
           <div class="workspace-eyebrow">Concept Plan Generator</div>
-          <h1 class="workspace-title">Turn a plan into a picture.</h1>
-          <p class="workspace-sub">Upload a floor plan, sketch, or site photo, describe what you're imagining, and get back a rendered concept image.</p>
+          <h1 class="workspace-title">Bring Your Idea Into Reality.</h1>
+          <p class="workspace-sub">Upload an Existing Conditions Plan, or an Aerial Image of your site without text, and colored to our legend. Then write a quick prompt of your desired development.</p>
         </div>
 
         ${state.errorMessage
