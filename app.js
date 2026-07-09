@@ -630,6 +630,9 @@ function siteIntakeFieldsComplete(fields) {
   );
 }
 
+// DELETE: siteIntakeFieldsComplete(fields) — no longer used
+// DELETE: runSiteIntakeFlow(user, promptText, fields) — no longer used
+
 async function handleGenerate() {
   const promptText = state.promptText.trim();
   if (!promptText) {
@@ -645,39 +648,7 @@ async function handleGenerate() {
 
   try {
     const user = state.session.user;
-
-    // A reference file always wins: site-intake is only ever used for the
-    // no-file, prompt-only path. If a file is present, this is exactly the
-    // original generate-concept flow -- site-intake is never touched.
-    if (state.sourceFile) {
-      await runGenerateConceptFlow(user, promptText);
-      return;
-    }
-
-    // No file: best-effort extract address/use_type/setbacks/parking from
-    // the prompt itself. Per product decision these are ONLY used if the
-    // user actually said them -- if the extraction comes back incomplete,
-    // we silently fall back to plain generate-concept, no error shown.
-    let extracted = null;
-    try {
-      const { data: parseResult, error: parseErr } = await invokeWithAuthRetry("parse-site-intake", {
-        prompt: promptText,
-      });
-      if (parseErr) {
-        console.warn("parse-site-intake failed, falling back to plain generation:", parseErr.message);
-      } else {
-        extracted = parseResult?.fields ?? null;
-      }
-    } catch (e) {
-      console.warn("parse-site-intake threw, falling back to plain generation:", e);
-    }
-
-    if (siteIntakeFieldsComplete(extracted)) {
-      await runSiteIntakeFlow(user, promptText, extracted);
-    } else {
-      await runGenerateConceptFlow(user, promptText);
-    }
-
+    await runGenerateConceptFlow(user, promptText);
   } catch (err) {
     console.error(err);
     stopPolling();
