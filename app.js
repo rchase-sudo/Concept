@@ -295,8 +295,8 @@
           <path d="M12 16V4M12 4l-4 4M12 4l4 4" stroke-linecap="round" stroke-linejoin="round"/>
           <path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
-        <div class="dropzone-text">Drop a floor plan, sketch, or photo</div>
-        <div class="dropzone-hint">PNG, JPG or PDF — optional</div>
+        <div class="dropzone-text">Drop a sketch or EC Plan</div>
+        <div class="dropzone-hint">Image File Format - PNG, JPG, Etc.</div>
         <input type="file" id="file-input" accept="image/*,application/pdf" />
       </div>`;
   }
