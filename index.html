@@ -624,6 +624,185 @@
     gap: 16px;
   }
 
+  /* ============================================================
+   FOLDERS + CARD MENU — paste into index.html's <style> block.
+   Also add `position: relative;` to the existing .history-card rule.
+   Also remove `margin-top: 56px;` from the existing .history-section
+   rule (the margin moves to .library-layout below instead).
+   ============================================================ */
+
+  .library-layout {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 24px;
+    margin-top: 56px;
+  }
+  @media (max-width: 880px) {
+    .library-layout { grid-template-columns: 1fr; }
+  }
+  
+  .folder-sidebar {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 20px;
+    align-self: start;
+  }
+  
+  .folder-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-bottom: 14px;
+  }
+  
+  .folder-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 9px 10px;
+    border-radius: 8px;
+    font-size: 13.5px;
+    cursor: pointer;
+    transition: background 0.2s var(--ease), border-color 0.2s var(--ease);
+    border: 1px solid transparent;
+    color: var(--paper-dim);
+  }
+  .folder-item:hover { background: var(--panel-raised); color: var(--paper); }
+  .folder-item.active { background: var(--panel-raised); color: var(--paper); border-color: var(--line); }
+  .folder-item.drag-over { border-color: var(--accent); background: rgba(62,207,142,0.08); }
+  
+  .folder-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  
+  .folder-actions {
+    display: flex;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.2s;
+    flex-shrink: 0;
+  }
+  .folder-item:hover .folder-actions { opacity: 1; }
+  
+  .icon-btn {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 3px 5px;
+    border-radius: 5px;
+    line-height: 1;
+  }
+  .icon-btn:hover { color: var(--paper); background: var(--void); }
+  
+  .folder-item.renaming { padding: 4px; }
+  
+  .folder-rename-input {
+    width: 100%;
+    background: var(--void);
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 6px 8px;
+    color: var(--paper);
+    font-size: 13.5px;
+    font-family: 'Inter', sans-serif;
+  }
+  .folder-rename-input:focus { outline: none; }
+  
+  .new-folder-form {
+    display: flex;
+    gap: 6px;
+    border-top: 1px solid var(--line);
+    padding-top: 14px;
+  }
+  .new-folder-form input {
+    flex: 1;
+    min-width: 0;
+    background: var(--void);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px 10px;
+    color: var(--paper);
+    font-size: 13px;
+    font-family: 'Inter', sans-serif;
+  }
+  .new-folder-form input:focus { outline: none; border-color: var(--paper-dim); }
+  .new-folder-btn { padding: 8px 12px; font-size: 15px; }
+  
+  .history-card.dragging { opacity: 0.4; }
+  
+  .kebab-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    border: 1px solid var(--line);
+    background: rgba(10,10,11,0.65);
+    backdrop-filter: blur(4px);
+    color: var(--paper);
+    cursor: pointer;
+    font-size: 15px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2;
+    transition: background 0.2s, border-color 0.2s;
+  }
+  .kebab-btn:hover { background: rgba(10,10,11,0.9); border-color: var(--paper-dim); }
+  
+  .card-menu {
+    position: absolute;
+    top: 38px;
+    right: 8px;
+    z-index: 5;
+    min-width: 170px;
+    background: var(--panel-raised);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 6px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    animation: rise 0.15s var(--ease);
+  }
+  
+  .card-menu-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    color: var(--paper);
+    font-size: 13px;
+    font-family: 'Inter', sans-serif;
+    padding: 8px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .card-menu-item:hover { background: var(--void); }
+  .card-menu-item.danger { color: #F0938A; }
+  .card-menu-item.current { color: var(--accent); }
+  
+  .card-menu-divider {
+    height: 1px;
+    background: var(--line);
+    margin: 5px 2px;
+  }
+  
+  .card-submenu {
+    margin: 2px 0 2px 4px;
+    padding-left: 8px;
+    border-left: 1px solid var(--line);
+    max-height: 180px;
+    overflow-y: auto;
+  }
+  
   .history-card {
     background: var(--panel);
     border: 1px solid var(--line);
@@ -631,6 +810,7 @@
     overflow: hidden;
     cursor: pointer;
     transition: all 0.3s var(--ease);
+    position: relative;
   }
   .history-card:hover {
     border-color: var(--paper-dim);
