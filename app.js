@@ -589,112 +589,184 @@
     render();
   }
 
-  async function handleGenerate() {
-    // ✅ FIX: read from state.promptText (kept in sync on every keystroke)
-    // rather than querying the DOM textarea directly. Functionally this was
-    // already safe against the render-wipe bug since it captured the value
-    // before any render() call — but sourcing from the same state the
-    // template renders from removes any doubt and keeps a single source of
-    // truth.
-    console.log("[diag] Generate clicked. state.promptText:", JSON.stringify(state.promptText));
-    const promptText = state.promptText.trim();
-    if (!promptText) {
-      console.log("[diag] Guard blocked submission — promptText was empty/whitespace at click time.");
-      state.errorMessage = "Please describe the concept you want to generate.";
-      render();
+  async function invokeWithAuthRetry(functionName, body) {
+  const { data: freshSession } = await sb.auth.getSession();
+  const accessToken = freshSession?.session?.access_token;
+
+  const attempt = (token) =>
+    sb.functions.invoke(functionName, {
+      body,
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    });
+
+  let result = await attempt(accessToken);
+  const errMsg = result?.error?.message || "";
+  if (errMsg.includes("UNAUTHORIZED_NO_AUTH_HEADER") || errMsg.includes("Missing authorization")) {
+    console.warn(`Auth header missing for ${functionName} — refreshing session and retrying once`);
+    const { data: refreshed } = await sb.auth.refreshSession();
+    const retryToken = refreshed?.session?.access_token;
+    result = await attempt(retryToken);
+  }
+  return result;
+}
+
+// Only true if the prompt actually stated EVERY field site-intake requires.
+// Anything missing means "the user didn't say it" -> fall back to plain
+// generate-concept rather than sending site-intake a request it will 400 on.
+function siteIntakeFieldsComplete(fields) {
+  if (!fields) return false;
+  const s = fields.setbacks_ft || {};
+  const p = fields.parking || {};
+  return (
+    !!fields.address &&
+    !!fields.use_type &&
+    typeof s.front === "number" &&
+    typeof s.side === "number" &&
+    typeof s.rear === "number" &&
+    typeof p.ratio_spaces === "number" &&
+    typeof p.ratio_unit_amount === "number" &&
+    !!p.ratio_unit_label &&
+    typeof p.project_metric_value === "number"
+  );
+}
+
+async function handleGenerate() {
+  const promptText = state.promptText.trim();
+  if (!promptText) {
+    state.errorMessage = "Please describe the concept you want to generate.";
+    render();
+    return;
+  }
+
+  state.generating     = true;
+  state.errorMessage   = "";
+  state.resultImageUrl = null;
+  render();
+
+  try {
+    const user = state.session.user;
+
+    // A reference file always wins: site-intake is only ever used for the
+    // no-file, prompt-only path. If a file is present, this is exactly the
+    // original generate-concept flow -- site-intake is never touched.
+    if (state.sourceFile) {
+      await runGenerateConceptFlow(user, promptText);
       return;
     }
 
-    state.generating     = true;
-    state.errorMessage   = "";
-    state.resultImageUrl = null;
-    render();
-
+    // No file: best-effort extract address/use_type/setbacks/parking from
+    // the prompt itself. Per product decision these are ONLY used if the
+    // user actually said them -- if the extraction comes back incomplete,
+    // we silently fall back to plain generate-concept, no error shown.
+    let extracted = null;
     try {
-      const user       = state.session.user;
-      let sourcePath   = null;
-      const sourceKind = state.sourceKind;
-
-      if (state.sourceFile) {
-        let uploadBlob = state.sourceFile;
-        let uploadExt  = (state.sourceFile.name.split(".").pop() || "png").toLowerCase();
-        let uploadType = state.sourceFile.type || undefined;
-
-        if (sourceKind === "pdf") {
-          try {
-            uploadBlob = await pdfFirstPageToImageBlob(state.sourceFile);
-            uploadExt  = "png";
-            uploadType = "image/png";
-          } catch (pdfErr) {
-            throw new Error(`Could not convert PDF to image: ${pdfErr.message}`);
-          }
-        }
-
-        sourcePath = `${user.id}/${Date.now()}-${crypto.randomUUID()}.${uploadExt}`;
-        const { error: upErr } = await sb.storage
-          .from("uploads")
-          .upload(sourcePath, uploadBlob, { contentType: uploadType });
-        if (upErr) throw new Error(`Upload failed: ${upErr.message}`);
-      }
-
-      const { data: gen, error: insErr } = await sb
-        .from("generations")
-        .insert({
-          user_id:     user.id,
-          prompt:      promptText,
-          source_path: sourcePath,
-          source_kind: sourceKind,
-          status:      "pending",
-        })
-        .select()
-        .single();
-      if (insErr) throw new Error(`Could not create generation: ${insErr.message}`);
-
-      state.currentGeneration = gen;
-      state.sourceFile        = null;
-      state.sourcePreviewUrl  = null;
-      state.sourceKind        = null;
-      // ✅ NEW: clear the prompt intentionally now that the generation has
-      // actually been created — previously this only ever appeared to
-      // happen (as a side-effect of the render-wipe bug), so it could fire
-      // before the value was captured. Now it's explicit and only happens
-      // after a successful insert.
-      state.promptText        = "";
-
-      startPolling(gen.id);
-      render();
-
-      const { data: freshSession } = await sb.auth.getSession();
-      const accessToken = freshSession?.session?.access_token;
-
-      const invokeGenerate = (token) =>
-        sb.functions.invoke("generate-concept", {
-          body: { generation_id: gen.id },
-          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-        });
-
-      invokeGenerate(accessToken).then((result) => {
-        const errMsg = result?.error?.message || "";
-        if (errMsg.includes("UNAUTHORIZED_NO_AUTH_HEADER") || errMsg.includes("Missing authorization")) {
-          console.warn("Auth header missing on first attempt — refreshing session and retrying once");
-          return sb.auth.refreshSession().then(({ data: refreshed }) => {
-            const retryToken = refreshed?.session?.access_token;
-            return invokeGenerate(retryToken);
-          });
-        }
-        return result;
-      }).catch((err) => {
-        console.warn("Invoke finished with error (polling continues):", err?.message);
+      const { data: parseResult, error: parseErr } = await invokeWithAuthRetry("parse-site-intake", {
+        prompt: promptText,
       });
-
-    } catch (err) {
-      console.error(err);
-      stopPolling();
-      state.errorMessage = err.message || "Something went wrong.";
-      state.generating   = false;
-      render();
+      if (parseErr) {
+        console.warn("parse-site-intake failed, falling back to plain generation:", parseErr.message);
+      } else {
+        extracted = parseResult?.fields ?? null;
+      }
+    } catch (e) {
+      console.warn("parse-site-intake threw, falling back to plain generation:", e);
     }
+
+    if (siteIntakeFieldsComplete(extracted)) {
+      await runSiteIntakeFlow(user, promptText, extracted);
+    } else {
+      await runGenerateConceptFlow(user, promptText);
+    }
+
+  } catch (err) {
+    console.error(err);
+    stopPolling();
+    state.errorMessage = err.message || "Something went wrong.";
+    state.generating   = false;
+    render();
   }
+}
+
+// Hand-uploaded file (or prompt with no usable site data) -> generate-concept.
+// This function pre-creates the `generations` row itself, exactly as before.
+async function runGenerateConceptFlow(user, promptText) {
+  let sourcePath   = null;
+  const sourceKind = state.sourceFile ? state.sourceKind : null;
+
+  if (state.sourceFile) {
+    let uploadBlob = state.sourceFile;
+    let uploadExt  = (state.sourceFile.name.split(".").pop() || "png").toLowerCase();
+    let uploadType = state.sourceFile.type || undefined;
+
+    if (sourceKind === "pdf") {
+      try {
+        uploadBlob = await pdfFirstPageToImageBlob(state.sourceFile);
+        uploadExt  = "png";
+        uploadType = "image/png";
+      } catch (pdfErr) {
+        throw new Error(`Could not convert PDF to image: ${pdfErr.message}`);
+      }
+    }
+
+    sourcePath = `${user.id}/${Date.now()}-${crypto.randomUUID()}.${uploadExt}`;
+    const { error: upErr } = await sb.storage
+      .from("uploads")
+      .upload(sourcePath, uploadBlob, { contentType: uploadType });
+    if (upErr) throw new Error(`Upload failed: ${upErr.message}`);
+  }
+
+  const { data: gen, error: insErr } = await sb
+    .from("generations")
+    .insert({
+      user_id:     user.id,
+      prompt:      promptText,
+      source_path: sourcePath,
+      source_kind: sourceKind,
+      status:      "pending",
+    })
+    .select()
+    .single();
+  if (insErr) throw new Error(`Could not create generation: ${insErr.message}`);
+
+  finishKickoff(gen);
+
+  invokeWithAuthRetry("generate-concept", { generation_id: gen.id }).catch((err) => {
+    console.warn("Invoke finished with error (polling continues):", err?.message);
+  });
+}
+
+// Prompt fully described site data -> site-intake. IMPORTANT: site-intake
+// creates its OWN `generations` row internally (with parcel/wetland data)
+// and kicks off generate-concept itself -- do NOT pre-insert a row here,
+// and poll using the generation_id IT returns, not one we made up.
+async function runSiteIntakeFlow(user, promptText, fields) {
+  const { data: result, error } = await invokeWithAuthRetry("site-intake", {
+    user_id:     user.id,
+    address:     fields.address,
+    use_type:    fields.use_type,
+    prompt:      promptText,
+    setbacks_ft: fields.setbacks_ft,
+    parking:     fields.parking,
+  });
+
+  if (error) throw new Error(`site-intake failed: ${error.message}`);
+  const generationId = result?.generation_id;
+  if (!generationId) throw new Error("site-intake did not return a generation_id");
+
+  // Minimal placeholder row -- the next poll tick fetches the real one.
+  finishKickoff({ id: generationId, status: "pending" });
+}
+
+function finishKickoff(gen) {
+  state.currentGeneration = gen;
+  state.sourceFile        = null;
+  state.sourcePreviewUrl  = null;
+  state.sourceKind        = null;
+  state.promptText        = "";
+
+  startPolling(gen.id);
+  render();
+}
 
   async function refreshHistory() {
     const user = state.session?.user;
