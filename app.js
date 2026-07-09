@@ -13,19 +13,17 @@
     sourcePreviewUrl: null,
     sourceKind: null,
 
-    // The prompt textarea is state-backed instead of DOM-only.
-    // Previously its typed content lived nowhere except the live <textarea>
-    // node, so ANY re-render (a poll tick, a background auth token refresh,
-    // etc.) would silently wipe it since the template had no bound value.
-    // Storing it here means a re-render always redraws whatever was last
-    // typed, no matter what triggered the render.
+    // The prompt textarea is state-backed instead of DOM-only. Previously
+    // its typed content lived nowhere except the live <textarea> node, so
+    // ANY re-render (a poll tick, a background auth token refresh, etc.)
+    // would silently wipe it. Storing it here means a re-render always
+    // redraws whatever was last typed, no matter what triggered the render.
     promptText: "",
 
     // Optional required-parking-stalls input. Blank string = no requirement
     // (generate-concept behaves exactly as before). A positive integer here
     // gets passed straight through to the `generations` row as
-    // required_parking_stalls, which generate-concept's refinement +
-    // review steps already know how to enforce.
+    // required_parking_stalls.
     parkingSpaces: "",
 
     generating: false,
@@ -36,6 +34,18 @@
     history: [],
     historyLoading: true,
     modalGeneration: null,
+
+    // ---- Folders ----
+    folders: [],
+    foldersLoading: true,
+    currentFolderId: null,     // null = "All concepts"
+    renamingFolderId: null,    // folder currently being renamed inline
+    renameFolderDraft: "",
+    newFolderDraft: "",        // state-backed "new folder" input, same reasoning as promptText
+
+    // ---- Per-card 3-dot menu ----
+    openMenuGenId: null,       // which history card's menu is open
+    moveSubmenuOpen: false,    // whether the "move to folder" submenu is expanded
 
     _pollInterval: null,
   };
@@ -295,8 +305,8 @@
           <path d="M12 16V4M12 4l-4 4M12 4l4 4" stroke-linecap="round" stroke-linejoin="round"/>
           <path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
-        <div class="dropzone-text">Drop a sketch or EC Plan</div>
-        <div class="dropzone-hint">Image File Format - PNG, JPG, Etc.</div>
+        <div class="dropzone-text">Drop a floor plan, sketch, or photo</div>
+        <div class="dropzone-hint">PNG, JPG or PDF — optional</div>
         <input type="file" id="file-input" accept="image/*,application/pdf" />
       </div>`;
   }
@@ -332,6 +342,54 @@
       </div>`;
   }
 
+  // ---- Folders ----
+
+  function renderFolderSidebar() {
+    const folderItems = state.folders.map(renderFolderItem).join("");
+    return `
+      <aside class="folder-sidebar">
+        <div class="panel-label">Folders</div>
+        <div class="folder-list">
+          <div class="folder-item ${state.currentFolderId === null ? "active" : ""}"
+               data-action="select-folder" data-folder-id=""
+               data-role="folder-drop" data-drop-target="root">
+            <span class="folder-name">All concepts</span>
+          </div>
+          ${folderItems}
+        </div>
+        <form id="new-folder-form" class="new-folder-form">
+          <input id="new-folder-input" placeholder="New folder name" autocomplete="off"
+            value="${escapeHtml(state.newFolderDraft)}" />
+          <button type="submit" class="btn btn-ghost new-folder-btn" title="Add folder">+</button>
+        </form>
+      </aside>`;
+  }
+
+  function renderFolderItem(folder) {
+    const isActive = state.currentFolderId === folder.id;
+
+    if (state.renamingFolderId === folder.id) {
+      return `
+        <div class="folder-item renaming" data-role="folder-drop" data-drop-target="${folder.id}">
+          <input class="folder-rename-input" data-folder-id="${folder.id}"
+            value="${escapeHtml(state.renameFolderDraft)}" />
+        </div>`;
+    }
+
+    return `
+      <div class="folder-item ${isActive ? "active" : ""}"
+           data-action="select-folder" data-folder-id="${folder.id}"
+           data-role="folder-drop" data-drop-target="${folder.id}">
+        <span class="folder-name">${escapeHtml(folder.name)}</span>
+        <span class="folder-actions">
+          <button class="icon-btn" data-action="rename-folder" data-folder-id="${folder.id}" title="Rename">✎</button>
+          <button class="icon-btn" data-action="delete-folder" data-folder-id="${folder.id}" title="Delete">🗑</button>
+        </span>
+      </div>`;
+  }
+
+  // ---- History cards + 3-dot menu ----
+
   function renderHistoryCard(item) {
     const pillClass = item.status === "completed" ? "complete"
                     : item.status === "failed"    ? "failed"
@@ -339,33 +397,83 @@
     const thumb = item.result_url || item.signedUrl
       ? `<img src="${item.result_url || item.signedUrl}" alt="" />`
       : `<span class="spin"></span>`;
+    const menuOpen = state.openMenuGenId === item.id;
+
     return `
-      <div class="history-card" data-action="open-history" data-id="${item.id}">
-        <div class="thumb-wrap">${thumb}</div>
-        <div class="body">
+      <div class="history-card" draggable="true" data-action-drag="gen" data-gen-id="${item.id}">
+        <div class="thumb-wrap" data-action="open-history" data-id="${item.id}">${thumb}</div>
+        <div class="body" data-action="open-history" data-id="${item.id}">
           <div class="title">${escapeHtml(item.title || item.prompt)}</div>
           <div class="date">${formatDate(item.created_at)}</div>
           <span class="pill ${pillClass}">${escapeHtml(statusLabel(item.status))}</span>
         </div>
+        <button class="kebab-btn" data-action="toggle-card-menu" data-id="${item.id}" title="More options">⋯</button>
+        ${menuOpen ? renderCardMenu(item) : ""}
       </div>`;
   }
 
+  function renderCardMenu(item) {
+    const canDownload = item.status === "completed" && (item.result_url || item.signedUrl);
+    return `
+      <div class="card-menu" data-role="card-menu">
+        ${canDownload
+          ? `<button class="card-menu-item" data-action="menu-download" data-id="${item.id}">Download</button>`
+          : ""}
+        <button class="card-menu-item" data-action="menu-move-toggle" data-id="${item.id}">Move to folder ▸</button>
+        ${state.moveSubmenuOpen ? renderMoveSubmenu(item) : ""}
+        <div class="card-menu-divider"></div>
+        <button class="card-menu-item danger" data-action="menu-delete" data-id="${item.id}">Delete</button>
+      </div>`;
+  }
+
+  function renderMoveSubmenu(item) {
+    const noFolderRow = `
+      <button class="card-menu-item ${!item.folder_id ? "current" : ""}"
+        data-action="move-to-folder" data-id="${item.id}" data-folder-id="">No folder</button>`;
+    const folderRows = state.folders.map((f) => `
+      <button class="card-menu-item ${item.folder_id === f.id ? "current" : ""}"
+        data-action="move-to-folder" data-id="${item.id}" data-folder-id="${f.id}">${escapeHtml(f.name)}</button>`
+    ).join("");
+    return `<div class="card-submenu">${noFolderRow}${folderRows}</div>`;
+  }
+
   function renderHistorySection() {
+    const filtered = state.currentFolderId === null
+      ? state.history
+      : state.history.filter((h) => h.folder_id === state.currentFolderId);
+
+    const folderName = state.currentFolderId === null
+      ? "All concepts"
+      : (state.folders.find((f) => f.id === state.currentFolderId)?.name || "Folder");
+
     let body;
     if (state.historyLoading) {
       body = `<div class="empty-state"><span class="spin"></span></div>`;
-    } else if (state.history.length === 0) {
-      body = `<div class="empty-state">No concepts yet — generate your first one above.</div>`;
+    } else if (filtered.length === 0) {
+      body = `<div class="empty-state">${
+        state.currentFolderId === null
+          ? "No concepts yet — generate your first one above."
+          : "No concepts in this folder yet — drag one here, or use a card's ⋯ menu."
+      }</div>`;
     } else {
-      body = `<div class="history-grid">${state.history.map(renderHistoryCard).join("")}</div>`;
+      body = `<div class="history-grid">${filtered.map(renderHistoryCard).join("")}</div>`;
     }
+
     return `
       <div class="history-section">
         <div class="history-head">
-          <div class="panel-label">Recent concepts</div>
+          <div class="panel-label">${escapeHtml(folderName)}</div>
           <button class="btn btn-ghost" data-action="refresh-history">Refresh</button>
         </div>
         ${body}
+      </div>`;
+  }
+
+  function renderLibrarySection() {
+    return `
+      <div class="library-layout">
+        ${renderFolderSidebar()}
+        ${renderHistorySection()}
       </div>`;
   }
 
@@ -374,8 +482,8 @@
       <main class="workspace">
         <div class="workspace-head">
           <div class="workspace-eyebrow">Concept Plan Generator</div>
-          <h1 class="workspace-title">Bring Your Idea Into Reality.</h1>
-          <p class="workspace-sub">Upload an Existing Conditions Plan, or an Aerial Image of your site without text, and colored to our legend. Then write a quick prompt of your desired development.</p>
+          <h1 class="workspace-title">Turn a plan into a picture.</h1>
+          <p class="workspace-sub">Upload a floor plan, sketch, or site photo, describe what you're imagining, and get back a rendered concept image.</p>
         </div>
 
         ${state.errorMessage
@@ -409,7 +517,7 @@
 
         ${renderStatusStrip()}
         ${renderResultPanel()}
-        ${renderHistorySection()}
+        ${renderLibrarySection()}
       </main>`;
   }
 
@@ -482,9 +590,8 @@
       });
     }
 
-    // The textarea is state-backed. Every keystroke updates
-    // state.promptText, so any later render() (poll tick, auth event, etc.)
-    // redraws the textarea with what was actually typed instead of blank.
+    // The prompt textarea is state-backed so a later render() (poll tick,
+    // auth event, etc.) redraws whatever was actually typed instead of blank.
     const promptBox = root.querySelector(".prompt-box");
     const charHint  = root.querySelector('[data-role="char-hint"]');
     if (promptBox && charHint) {
@@ -494,7 +601,6 @@
       });
     }
 
-    // Same state-backed pattern for the optional parking input.
     const parkingInput = root.querySelector("#parking-input");
     if (parkingInput) {
       parkingInput.addEventListener("input", () => {
@@ -504,7 +610,90 @@
 
     const modalCard = root.querySelector('[data-role="modal-card"]');
     if (modalCard) modalCard.addEventListener("click", (e) => e.stopPropagation());
+
+    // ---- New-folder form ----
+    const newFolderForm = root.querySelector("#new-folder-form");
+    if (newFolderForm) newFolderForm.addEventListener("submit", onNewFolderSubmit);
+
+    const newFolderInput = root.querySelector("#new-folder-input");
+    if (newFolderInput) {
+      newFolderInput.addEventListener("input", () => {
+        state.newFolderDraft = newFolderInput.value;
+      });
+    }
+
+    // ---- Inline folder rename ----
+    const renameInput = root.querySelector(".folder-rename-input");
+    if (renameInput) {
+      renameInput.focus();
+      renameInput.select();
+      renameInput.addEventListener("input", () => {
+        state.renameFolderDraft = renameInput.value;
+      });
+      renameInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commitFolderRename();
+        } else if (e.key === "Escape") {
+          state.renamingFolderId = null;
+          render();
+        }
+      });
+      renameInput.addEventListener("blur", () => {
+        commitFolderRename();
+      });
+    }
+
+    // ---- Drag-and-drop: cards -> folders ----
+    // IMPORTANT: dragover/dragleave toggle a class directly on the real DOM
+    // node instead of going through state + render(). Calling render() mid-drag
+    // would replace the DOM (including the element being dragged) and silently
+    // cancel the native HTML5 drag operation. render() is only called from the
+    // `drop` handler below, which fires after the drag session has ended.
+    root.querySelectorAll('[data-action-drag="gen"]').forEach((el) => {
+      el.addEventListener("dragstart", (e) => {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", el.dataset.genId);
+        el.classList.add("dragging");
+      });
+      el.addEventListener("dragend", () => {
+        el.classList.remove("dragging");
+      });
+    });
+
+    root.querySelectorAll('[data-role="folder-drop"]').forEach((el) => {
+      el.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        el.classList.add("drag-over");
+      });
+      el.addEventListener("dragleave", () => {
+        el.classList.remove("drag-over");
+      });
+      el.addEventListener("drop", (e) => {
+        e.preventDefault();
+        el.classList.remove("drag-over");
+        const genId = e.dataTransfer.getData("text/plain");
+        if (!genId) return;
+        const dropTarget = el.dataset.dropTarget;
+        const folderId = dropTarget === "root" ? null : dropTarget;
+        moveGenerationToFolder(genId, folderId);
+      });
+    });
   }
+
+  // Closes any open card menu when clicking outside it. Bound once, at
+  // module load (not inside attachListeners), so it never gets re-bound or
+  // duplicated across renders.
+  document.addEventListener("click", (e) => {
+    if (state.openMenuGenId === null) return;
+    const withinMenu = e.target.closest(".card-menu, .kebab-btn");
+    if (!withinMenu) {
+      state.openMenuGenId = null;
+      state.moveSubmenuOpen = false;
+      render();
+    }
+  });
 
   function onAction(e) {
     const action = e.currentTarget.dataset.action;
@@ -557,6 +746,65 @@
         const gen    = state.modalGeneration;
         const imgUrl = gen?.result_url || gen?.signedUrl;
         if (imgUrl) downloadAsPdf(imgUrl, gen.title);
+      },
+
+      // ---- Folders ----
+      "select-folder": () => {
+        const id = e.currentTarget.dataset.folderId;
+        state.currentFolderId = id ? id : null;
+        state.openMenuGenId = null;
+        render();
+      },
+      "rename-folder": () => {
+        const id = e.currentTarget.dataset.folderId;
+        const folder = state.folders.find((f) => f.id === id);
+        if (!folder) return;
+        state.renamingFolderId = id;
+        state.renameFolderDraft = folder.name;
+        render();
+      },
+      "delete-folder": () => {
+        const id = e.currentTarget.dataset.folderId;
+        const folder = state.folders.find((f) => f.id === id);
+        if (!folder) return;
+        if (!confirm(`Delete folder "${folder.name}"? Concepts inside it will move to "All concepts" — they will NOT be deleted.`)) return;
+        deleteFolder(id);
+      },
+
+      // ---- Per-card 3-dot menu ----
+      "toggle-card-menu": () => {
+        const id = e.currentTarget.dataset.id;
+        state.openMenuGenId = state.openMenuGenId === id ? null : id;
+        state.moveSubmenuOpen = false;
+        render();
+      },
+      "menu-download": () => {
+        const id = e.currentTarget.dataset.id;
+        const item = state.history.find((h) => h.id === id);
+        const url = item?.result_url || item?.signedUrl;
+        if (url) downloadFromUrl(url, `${slugify(item.title)}.png`);
+        state.openMenuGenId = null;
+        state.moveSubmenuOpen = false;
+        render();
+      },
+      "menu-move-toggle": () => {
+        state.moveSubmenuOpen = !state.moveSubmenuOpen;
+        render();
+      },
+      "move-to-folder": () => {
+        const id = e.currentTarget.dataset.id;
+        const folderId = e.currentTarget.dataset.folderId || null;
+        state.openMenuGenId = null;
+        state.moveSubmenuOpen = false;
+        moveGenerationToFolder(id, folderId);
+      },
+      "menu-delete": () => {
+        const id = e.currentTarget.dataset.id;
+        state.openMenuGenId = null;
+        state.moveSubmenuOpen = false;
+        render();
+        if (!confirm("Delete this concept? This can't be undone.")) return;
+        deleteGeneration(id);
       },
     };
     if (handlers[action]) handlers[action]();
@@ -641,8 +889,7 @@
     }
 
     // Optional required-parking-stalls field. Blank -> null -> generate-concept
-    // no-ops on parking entirely, same as before this field existed. A filled
-    // in value must be a positive whole number.
+    // no-ops on parking entirely. A filled-in value must be a positive whole number.
     let requiredParkingStalls = null;
     const rawParking = state.parkingSpaces.trim();
     if (rawParking) {
@@ -672,10 +919,9 @@
     }
   }
 
-  // Creates the `generations` row and kicks off generate-concept.
-  // requiredParkingStalls is optional (null by default): when set, it's
-  // written straight onto the row, and generate-concept's own refinement +
-  // review steps already know how to read and enforce it.
+  // Creates the `generations` row and kicks off generate-concept. A new
+  // concept always lands in "All concepts" (folder_id null) at creation
+  // time -- moving it into a folder afterward is a separate action.
   async function runGenerateConceptFlow(user, promptText, requiredParkingStalls = null) {
     let sourcePath   = null;
     const sourceKind = state.sourceFile ? state.sourceKind : null;
@@ -772,6 +1018,160 @@
   }
 
   // ---------------------------------------------------------------
+  // Folders — backend calls
+  // ---------------------------------------------------------------
+
+  async function loadFolders() {
+    const user = state.session?.user;
+    if (!user) return;
+
+    const { data, error } = await sb
+      .from("folders")
+      .select("*")
+      .eq("user_id", user.id)
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      console.error("Failed to load folders:", error);
+      state.foldersLoading = false;
+      render();
+      return;
+    }
+
+    state.folders = data || [];
+    state.foldersLoading = false;
+    render();
+  }
+
+  async function onNewFolderSubmit(e) {
+    e.preventDefault();
+    const name = state.newFolderDraft.trim();
+    if (!name) return;
+    await createFolder(name);
+  }
+
+  async function createFolder(name) {
+    const user = state.session?.user;
+    if (!user) return;
+
+    const { data, error } = await sb
+      .from("folders")
+      .insert({ user_id: user.id, name })
+      .select()
+      .single();
+
+    if (error) {
+      state.errorMessage = `Could not create folder: ${error.message}`;
+      render();
+      return;
+    }
+
+    state.folders = [...state.folders, data];
+    state.newFolderDraft = "";
+    render();
+  }
+
+  async function commitFolderRename() {
+    const id = state.renamingFolderId;
+    if (!id) return; // already committed (e.g. Enter then blur firing twice) -- no-op
+    const name = state.renameFolderDraft.trim();
+    state.renamingFolderId = null;
+    if (!name) { render(); return; }
+    await renameFolder(id, name);
+  }
+
+  async function renameFolder(id, name) {
+    const { data, error } = await sb
+      .from("folders")
+      .update({ name })
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error) {
+      state.errorMessage = `Could not rename folder: ${error.message}`;
+      render();
+      return;
+    }
+
+    state.folders = state.folders.map((f) => (f.id === id ? data : f));
+    render();
+  }
+
+  async function deleteFolder(id) {
+    const { error } = await sb.from("folders").delete().eq("id", id);
+
+    if (error) {
+      state.errorMessage = `Could not delete folder: ${error.message}`;
+      render();
+      return;
+    }
+
+    state.folders = state.folders.filter((f) => f.id !== id);
+    // The DB's ON DELETE SET NULL already cleared folder_id server-side;
+    // mirror that locally so the UI matches without waiting for a refetch.
+    state.history = state.history.map((h) => (h.folder_id === id ? { ...h, folder_id: null } : h));
+    if (state.currentFolderId === id) state.currentFolderId = null;
+    render();
+  }
+
+  async function moveGenerationToFolder(generationId, folderId) {
+    const { error } = await sb
+      .from("generations")
+      .update({ folder_id: folderId })
+      .eq("id", generationId);
+
+    if (error) {
+      state.errorMessage = `Could not move concept: ${error.message}`;
+      render();
+      return;
+    }
+
+    state.history = state.history.map((h) =>
+      h.id === generationId ? { ...h, folder_id: folderId } : h
+    );
+    render();
+  }
+
+  async function deleteGeneration(id) {
+    const item = state.history.find((h) => h.id === id)
+      || (state.modalGeneration?.id === id ? state.modalGeneration : null);
+
+    // Best-effort cleanup of storage objects -- don't block the DB delete on these.
+    if (item?.output_path) {
+      try {
+        await sb.storage.from("outputs").remove([item.output_path]);
+      } catch (e) {
+        console.warn("Failed to remove output file (non-fatal):", e);
+      }
+    }
+    if (item?.source_path) {
+      try {
+        await sb.storage.from("uploads").remove([item.source_path]);
+      } catch (e) {
+        console.warn("Failed to remove source file (non-fatal):", e);
+      }
+    }
+
+    const { error } = await sb.from("generations").delete().eq("id", id);
+    if (error) {
+      state.errorMessage = `Could not delete concept: ${error.message}`;
+      render();
+      return;
+    }
+
+    state.history = state.history.filter((h) => h.id !== id);
+    if (state.currentGeneration?.id === id) {
+      state.currentGeneration = null;
+      state.resultImageUrl = null;
+    }
+    if (state.modalGeneration?.id === id) {
+      state.modalGeneration = null;
+    }
+    render();
+  }
+
+  // ---------------------------------------------------------------
   // Boot
   // ---------------------------------------------------------------
 
@@ -820,7 +1220,10 @@
     }
 
     render();
-    if (state.session) refreshHistory();
+    if (state.session) {
+      refreshHistory();
+      loadFolders();
+    }
 
     // Supabase silently refreshes the access token on a timer AND on
     // tab/window focus. Only SIGNED_IN / SIGNED_OUT / USER_UPDATED actually
@@ -840,12 +1243,16 @@
         stopPolling();
         state.history           = [];
         state.historyLoading    = true;
+        state.folders           = [];
+        state.foldersLoading    = true;
+        state.currentFolderId   = null;
         state.currentGeneration = null;
         state.resultImageUrl    = null;
       }
       render();
       if (session) {
         refreshHistory();
+        loadFolders();
         checkPaidStatusAndRoute(session);
       }
     });
