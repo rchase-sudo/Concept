@@ -13,13 +13,20 @@
     sourcePreviewUrl: null,
     sourceKind: null,
 
-    // ✅ NEW: the prompt textarea is now state-backed instead of DOM-only.
+    // The prompt textarea is state-backed instead of DOM-only.
     // Previously its typed content lived nowhere except the live <textarea>
     // node, so ANY re-render (a poll tick, a background auth token refresh,
     // etc.) would silently wipe it since the template had no bound value.
     // Storing it here means a re-render always redraws whatever was last
     // typed, no matter what triggered the render.
     promptText: "",
+
+    // Optional required-parking-stalls input. Blank string = no requirement
+    // (generate-concept behaves exactly as before). A positive integer here
+    // gets passed straight through to the `generations` row as
+    // required_parking_stalls, which generate-concept's refinement +
+    // review steps already know how to enforce.
+    parkingSpaces: "",
 
     generating: false,
     errorMessage: "",
@@ -383,6 +390,14 @@
           <div class="panel">
             <div class="panel-label">Describe the concept</div>
             <textarea class="prompt-box" placeholder="e.g. A warm, modern kitchen renovation with white oak cabinetry, a large island, and soft pendant lighting over the counter.">${escapeHtml(state.promptText)}</textarea>
+            <div class="parking-row">
+              <label for="parking-input" class="parking-label">
+                Required parking spaces <span class="optional-tag">optional</span>
+              </label>
+              <input id="parking-input" type="number" min="1" step="1"
+                class="parking-input" placeholder="e.g. 40"
+                value="${escapeHtml(state.parkingSpaces)}" />
+            </div>
             <div class="generate-row">
               <span class="char-hint" data-role="char-hint">${state.promptText.length} characters</span>
               <button class="btn btn-primary" data-action="generate" ${state.generating ? "disabled" : ""}>
@@ -467,7 +482,7 @@
       });
     }
 
-    // ✅ FIX: the textarea is now state-backed. Every keystroke updates
+    // The textarea is state-backed. Every keystroke updates
     // state.promptText, so any later render() (poll tick, auth event, etc.)
     // redraws the textarea with what was actually typed instead of blank.
     const promptBox = root.querySelector(".prompt-box");
@@ -476,7 +491,14 @@
       promptBox.addEventListener("input", () => {
         state.promptText = promptBox.value;
         charHint.textContent = `${promptBox.value.length} characters`;
-        console.log("[diag] input event fired, state.promptText now:", JSON.stringify(state.promptText));
+      });
+    }
+
+    // Same state-backed pattern for the optional parking input.
+    const parkingInput = root.querySelector("#parking-input");
+    if (parkingInput) {
+      parkingInput.addEventListener("input", () => {
+        state.parkingSpaces = parkingInput.value;
       });
     }
 
@@ -590,154 +612,128 @@
   }
 
   async function invokeWithAuthRetry(functionName, body) {
-  const { data: freshSession } = await sb.auth.getSession();
-  const accessToken = freshSession?.session?.access_token;
+    const { data: freshSession } = await sb.auth.getSession();
+    const accessToken = freshSession?.session?.access_token;
 
-  const attempt = (token) =>
-    sb.functions.invoke(functionName, {
-      body,
-      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-    });
+    const attempt = (token) =>
+      sb.functions.invoke(functionName, {
+        body,
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
 
-  let result = await attempt(accessToken);
-  const errMsg = result?.error?.message || "";
-  if (errMsg.includes("UNAUTHORIZED_NO_AUTH_HEADER") || errMsg.includes("Missing authorization")) {
-    console.warn(`Auth header missing for ${functionName} — refreshing session and retrying once`);
-    const { data: refreshed } = await sb.auth.refreshSession();
-    const retryToken = refreshed?.session?.access_token;
-    result = await attempt(retryToken);
-  }
-  return result;
-}
-
-// Only true if the prompt actually stated EVERY field site-intake requires.
-// Anything missing means "the user didn't say it" -> fall back to plain
-// generate-concept rather than sending site-intake a request it will 400 on.
-function siteIntakeFieldsComplete(fields) {
-  if (!fields) return false;
-  const s = fields.setbacks_ft || {};
-  const p = fields.parking || {};
-  return (
-    !!fields.address &&
-    !!fields.use_type &&
-    typeof s.front === "number" &&
-    typeof s.side === "number" &&
-    typeof s.rear === "number" &&
-    typeof p.ratio_spaces === "number" &&
-    typeof p.ratio_unit_amount === "number" &&
-    !!p.ratio_unit_label &&
-    typeof p.project_metric_value === "number"
-  );
-}
-
-// DELETE: siteIntakeFieldsComplete(fields) — no longer used
-// DELETE: runSiteIntakeFlow(user, promptText, fields) — no longer used
-
-async function handleGenerate() {
-  const promptText = state.promptText.trim();
-  if (!promptText) {
-    state.errorMessage = "Please describe the concept you want to generate.";
-    render();
-    return;
+    let result = await attempt(accessToken);
+    const errMsg = result?.error?.message || "";
+    if (errMsg.includes("UNAUTHORIZED_NO_AUTH_HEADER") || errMsg.includes("Missing authorization")) {
+      console.warn(`Auth header missing for ${functionName} — refreshing session and retrying once`);
+      const { data: refreshed } = await sb.auth.refreshSession();
+      const retryToken = refreshed?.session?.access_token;
+      result = await attempt(retryToken);
+    }
+    return result;
   }
 
-  state.generating     = true;
-  state.errorMessage   = "";
-  state.resultImageUrl = null;
-  render();
-
-  try {
-    const user = state.session.user;
-    await runGenerateConceptFlow(user, promptText);
-  } catch (err) {
-    console.error(err);
-    stopPolling();
-    state.errorMessage = err.message || "Something went wrong.";
-    state.generating   = false;
-    render();
-  }
-}
-
-// Hand-uploaded file (or prompt with no usable site data) -> generate-concept.
-// This function pre-creates the `generations` row itself, exactly as before.
-async function runGenerateConceptFlow(user, promptText) {
-  let sourcePath   = null;
-  const sourceKind = state.sourceFile ? state.sourceKind : null;
-
-  if (state.sourceFile) {
-    let uploadBlob = state.sourceFile;
-    let uploadExt  = (state.sourceFile.name.split(".").pop() || "png").toLowerCase();
-    let uploadType = state.sourceFile.type || undefined;
-
-    if (sourceKind === "pdf") {
-      try {
-        uploadBlob = await pdfFirstPageToImageBlob(state.sourceFile);
-        uploadExt  = "png";
-        uploadType = "image/png";
-      } catch (pdfErr) {
-        throw new Error(`Could not convert PDF to image: ${pdfErr.message}`);
-      }
+  async function handleGenerate() {
+    const promptText = state.promptText.trim();
+    if (!promptText) {
+      state.errorMessage = "Please describe the concept you want to generate.";
+      render();
+      return;
     }
 
-    sourcePath = `${user.id}/${Date.now()}-${crypto.randomUUID()}.${uploadExt}`;
-    const { error: upErr } = await sb.storage
-      .from("uploads")
-      .upload(sourcePath, uploadBlob, { contentType: uploadType });
-    if (upErr) throw new Error(`Upload failed: ${upErr.message}`);
+    // Optional required-parking-stalls field. Blank -> null -> generate-concept
+    // no-ops on parking entirely, same as before this field existed. A filled
+    // in value must be a positive whole number.
+    let requiredParkingStalls = null;
+    const rawParking = state.parkingSpaces.trim();
+    if (rawParking) {
+      const n = parseInt(rawParking, 10);
+      if (!Number.isFinite(n) || n <= 0) {
+        state.errorMessage = "Parking spaces must be a positive whole number.";
+        render();
+        return;
+      }
+      requiredParkingStalls = n;
+    }
+
+    state.generating     = true;
+    state.errorMessage   = "";
+    state.resultImageUrl = null;
+    render();
+
+    try {
+      const user = state.session.user;
+      await runGenerateConceptFlow(user, promptText, requiredParkingStalls);
+    } catch (err) {
+      console.error(err);
+      stopPolling();
+      state.errorMessage = err.message || "Something went wrong.";
+      state.generating   = false;
+      render();
+    }
   }
 
-  const { data: gen, error: insErr } = await sb
-    .from("generations")
-    .insert({
-      user_id:     user.id,
-      prompt:      promptText,
-      source_path: sourcePath,
-      source_kind: sourceKind,
-      status:      "pending",
-    })
-    .select()
-    .single();
-  if (insErr) throw new Error(`Could not create generation: ${insErr.message}`);
+  // Creates the `generations` row and kicks off generate-concept.
+  // requiredParkingStalls is optional (null by default): when set, it's
+  // written straight onto the row, and generate-concept's own refinement +
+  // review steps already know how to read and enforce it.
+  async function runGenerateConceptFlow(user, promptText, requiredParkingStalls = null) {
+    let sourcePath   = null;
+    const sourceKind = state.sourceFile ? state.sourceKind : null;
 
-  finishKickoff(gen);
+    if (state.sourceFile) {
+      let uploadBlob = state.sourceFile;
+      let uploadExt  = (state.sourceFile.name.split(".").pop() || "png").toLowerCase();
+      let uploadType = state.sourceFile.type || undefined;
 
-  invokeWithAuthRetry("generate-concept", { generation_id: gen.id }).catch((err) => {
-    console.warn("Invoke finished with error (polling continues):", err?.message);
-  });
-}
+      if (sourceKind === "pdf") {
+        try {
+          uploadBlob = await pdfFirstPageToImageBlob(state.sourceFile);
+          uploadExt  = "png";
+          uploadType = "image/png";
+        } catch (pdfErr) {
+          throw new Error(`Could not convert PDF to image: ${pdfErr.message}`);
+        }
+      }
 
-// Prompt fully described site data -> site-intake. IMPORTANT: site-intake
-// creates its OWN `generations` row internally (with parcel/wetland data)
-// and kicks off generate-concept itself -- do NOT pre-insert a row here,
-// and poll using the generation_id IT returns, not one we made up.
-async function runSiteIntakeFlow(user, promptText, fields) {
-  const { data: result, error } = await invokeWithAuthRetry("site-intake", {
-    user_id:     user.id,
-    address:     fields.address,
-    use_type:    fields.use_type,
-    prompt:      promptText,
-    setbacks_ft: fields.setbacks_ft,
-    parking:     fields.parking,
-  });
+      sourcePath = `${user.id}/${Date.now()}-${crypto.randomUUID()}.${uploadExt}`;
+      const { error: upErr } = await sb.storage
+        .from("uploads")
+        .upload(sourcePath, uploadBlob, { contentType: uploadType });
+      if (upErr) throw new Error(`Upload failed: ${upErr.message}`);
+    }
 
-  if (error) throw new Error(`site-intake failed: ${error.message}`);
-  const generationId = result?.generation_id;
-  if (!generationId) throw new Error("site-intake did not return a generation_id");
+    const { data: gen, error: insErr } = await sb
+      .from("generations")
+      .insert({
+        user_id:     user.id,
+        prompt:      promptText,
+        source_path: sourcePath,
+        source_kind: sourceKind,
+        status:      "pending",
+        required_parking_stalls: requiredParkingStalls,
+      })
+      .select()
+      .single();
+    if (insErr) throw new Error(`Could not create generation: ${insErr.message}`);
 
-  // Minimal placeholder row -- the next poll tick fetches the real one.
-  finishKickoff({ id: generationId, status: "pending" });
-}
+    finishKickoff(gen);
 
-function finishKickoff(gen) {
-  state.currentGeneration = gen;
-  state.sourceFile        = null;
-  state.sourcePreviewUrl  = null;
-  state.sourceKind        = null;
-  state.promptText        = "";
+    invokeWithAuthRetry("generate-concept", { generation_id: gen.id }).catch((err) => {
+      console.warn("Invoke finished with error (polling continues):", err?.message);
+    });
+  }
 
-  startPolling(gen.id);
-  render();
-}
+  function finishKickoff(gen) {
+    state.currentGeneration = gen;
+    state.sourceFile        = null;
+    state.sourcePreviewUrl  = null;
+    state.sourceKind        = null;
+    state.promptText        = "";
+    state.parkingSpaces     = "";
+
+    startPolling(gen.id);
+    render();
+  }
 
   async function refreshHistory() {
     const user = state.session?.user;
@@ -826,19 +822,13 @@ function finishKickoff(gen) {
     render();
     if (state.session) refreshHistory();
 
-    // ✅ FIX: this is the actual root cause of the reported bug. Supabase
-    // silently refreshes the access token on a timer AND on tab/window
-    // focus. Previously, ANY event here — including routine, invisible
-    // "TOKEN_REFRESHED" events — triggered a full render() that rebuilt
-    // #root from scratch, wiping the uncontrolled prompt textarea and
-    // re-running the paid-status redirect check. In practice: type a
-    // prompt, tab away and back (or just wait), and the whole workspace
-    // silently rebuilds itself under you.
-    //
-    // Only SIGNED_IN / SIGNED_OUT (and USER_UPDATED, in case profile data
-    // changes) actually need a rebuild + redirect check. TOKEN_REFRESHED
-    // still needs state.session updated (so subsequent Supabase calls use
-    // the fresh token) but must NOT touch the DOM or re-run redirect logic.
+    // Supabase silently refreshes the access token on a timer AND on
+    // tab/window focus. Only SIGNED_IN / SIGNED_OUT / USER_UPDATED actually
+    // need a rebuild + redirect check. TOKEN_REFRESHED still needs
+    // state.session updated (so subsequent Supabase calls use the fresh
+    // token) but must NOT touch the DOM or re-run redirect logic, or it
+    // silently wipes in-progress state (e.g. the prompt textarea) on every
+    // routine token refresh.
     sb.auth.onAuthStateChange((event, session) => {
       state.session = session;
 
@@ -862,16 +852,4 @@ function finishKickoff(gen) {
   }
 
   init();
-
-  // ✅ DIAGNOSTIC: definitively answers "is this a real page reload, or just
-  // a DOM rebuild that feels like one?" A real navigation logs "unloading"
-  // right before the page goes blank, and a fresh page load logs "fresh
-  // load" — if you see "fresh load" in the console after clicking Generate,
-  // it's an actual browser-level reload, not a render() call, which points
-  // to something entirely different (e.g. a stray form submission, a
-  // location.href assignment, or a link/anchor swallowing the click).
-  window.addEventListener("beforeunload", () => {
-    console.log("[diag] ACTUAL PAGE UNLOAD DETECTED — this is a real browser navigation, not a DOM re-render.");
-  });
-  console.log("[diag] fresh load —", performance.getEntriesByType("navigation")[0]?.type || "unknown nav type");
 })();
