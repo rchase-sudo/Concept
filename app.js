@@ -556,8 +556,8 @@
       <main class="workspace">
         <div class="workspace-head">
           <div class="workspace-eyebrow">Concept Plan Generator</div>
-          <h1 class="workspace-title">Turn a plan into a picture.</h1>
-          <p class="workspace-sub">Upload a floor plan, sketch, or site photo, describe what you're imagining, and get back a rendered concept image.</p>
+          <h1 class="workspace-title">Put your ideas to paper.</h1>
+          <p class="workspace-sub">Upload an EC Plan, sketch, or property image, describe your vision, and receive a rendered conceptual design.</p>
         </div>
 
         ${state.errorMessage
@@ -572,7 +572,7 @@
           </div>
           <div class="panel">
             <div class="panel-label">Describe the concept</div>
-            <textarea class="prompt-box" placeholder="e.g. A warm, modern kitchen renovation with white oak cabinetry, a large island, and soft pendant lighting over the counter.">${escapeHtml(state.promptText)}</textarea>
+            <textarea class="prompt-box" placeholder="e.g. A detatched emergency Room with an ambulance drive thru">${escapeHtml(state.promptText)}</textarea>
             <div class="parking-row">
               <label for="parking-input" class="parking-label">
                 Required parking spaces <span class="optional-tag">optional</span>
