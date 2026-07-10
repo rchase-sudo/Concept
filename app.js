@@ -47,8 +47,7 @@
     openMenuGenId: null,       // which history card's menu is open
     moveSubmenuOpen: false,    // whether the "move to folder" submenu is expanded
 
-    // ---- Plan legend ----
-    legendOpen: false,
+   
 
     _pollInterval: null,
   };
@@ -364,20 +363,12 @@
           <div class="legend-desc">${escapeHtml(item.desc)}</div>
         </div>
       </div>`).join("");
-
+  
     return `
-      <div class="legend ${state.legendOpen ? "open" : ""}">
-        <button type="button" class="legend-toggle" data-action="toggle-legend" aria-expanded="${state.legendOpen}">
-          <span class="legend-toggle-label">
-            <svg class="legend-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
-              <path d="M4 6h16M4 12h16M4 18h10" stroke-linecap="round"/>
-            </svg>
-            Plan legend
-          </span>
-          <svg class="legend-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-            <path d="M6 9l6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </button>
+      <div class="legend always-open">
+        <div class="legend-header">
+          <span class="legend-title">Plan legend</span>
+        </div>
         <div class="legend-body">
           <div class="legend-hint">If your uploaded reference uses these lines, this is how each one is read.</div>
           <div class="legend-grid">${rows}</div>
@@ -824,10 +815,7 @@
       },
 
       // ---- Plan legend ----
-      "toggle-legend": () => {
-        state.legendOpen = !state.legendOpen;
-        render();
-      },
+      
 
       // ---- Folders ----
       "select-folder": () => {
