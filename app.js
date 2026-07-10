@@ -47,6 +47,9 @@
     openMenuGenId: null,       // which history card's menu is open
     moveSubmenuOpen: false,    // whether the "move to folder" submenu is expanded
 
+    // ---- Plan legend ----
+    legendOpen: false,
+
     _pollInterval: null,
   };
 
@@ -311,6 +314,77 @@
       </div>`;
   }
 
+  // ---- Plan legend ----
+  // Static reference describing the line colors/styles a user's uploaded
+  // reference plan may use, and what each one is treated as by the pipeline
+  // (mirrors ORIGINAL_PLAN_RULES in the generate-concept edge function).
+  const LEGEND_ITEMS = [
+    {
+      swatchClass: "magenta thick solid",
+      label: "Property line",
+      desc: "No development is allowed outside this line, other than access to an existing road.",
+    },
+    {
+      swatchClass: "yellow thin dashed",
+      label: "Building setback line",
+      desc: "No development beyond this line, other than road access and proposed vegetation.",
+    },
+    {
+      swatchClass: "green thick dashed shaded",
+      label: "Wetland setback area",
+      desc: "No development or alteration inside this area, other than grading.",
+    },
+    {
+      swatchClass: "orange thin dashed",
+      label: "Pavement setback",
+      desc: "Nothing beyond this setback, other than vegetation.",
+    },
+    {
+      swatchClass: "red thick solid",
+      label: "Desired access road",
+      desc: "This location must be used for site access.",
+    },
+    {
+      swatchClass: "blue thick solid",
+      label: "Desired building location",
+      desc: "This location must be used for the proposed building — no other buildings may be added.",
+    },
+  ];
+
+  function renderLegendSwatch(swatchClass) {
+    return `<span class="legend-swatch ${swatchClass}"></span>`;
+  }
+
+  function renderLegend() {
+    const rows = LEGEND_ITEMS.map((item) => `
+      <div class="legend-row">
+        ${renderLegendSwatch(item.swatchClass)}
+        <div class="legend-text">
+          <div class="legend-label">${escapeHtml(item.label)}</div>
+          <div class="legend-desc">${escapeHtml(item.desc)}</div>
+        </div>
+      </div>`).join("");
+
+    return `
+      <div class="legend ${state.legendOpen ? "open" : ""}">
+        <button type="button" class="legend-toggle" data-action="toggle-legend" aria-expanded="${state.legendOpen}">
+          <span class="legend-toggle-label">
+            <svg class="legend-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+              <path d="M4 6h16M4 12h16M4 18h10" stroke-linecap="round"/>
+            </svg>
+            Plan legend
+          </span>
+          <svg class="legend-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M6 9l6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <div class="legend-body">
+          <div class="legend-hint">If your uploaded reference uses these lines, this is how each one is read.</div>
+          <div class="legend-grid">${rows}</div>
+        </div>
+      </div>`;
+  }
+
   function renderStatusStrip() {
     const gen = state.currentGeneration;
     if (!gen || isTerminal(gen.status)) return "";
@@ -494,6 +568,7 @@
           <div class="panel">
             <div class="panel-label">Reference (optional)</div>
             ${renderDropzone()}
+            ${renderLegend()}
           </div>
           <div class="panel">
             <div class="panel-label">Describe the concept</div>
@@ -746,6 +821,12 @@
         const gen    = state.modalGeneration;
         const imgUrl = gen?.result_url || gen?.signedUrl;
         if (imgUrl) downloadAsPdf(imgUrl, gen.title);
+      },
+
+      // ---- Plan legend ----
+      "toggle-legend": () => {
+        state.legendOpen = !state.legendOpen;
+        render();
       },
 
       // ---- Folders ----
