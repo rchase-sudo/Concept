@@ -26,6 +26,18 @@
     --danger: #E05A4E;
     --radius: 14px;
     --ease: cubic-bezier(0.16, 1, 0.3, 1);
+
+    /* Legend line colors — match the rules the pipeline enforces on
+       uploaded reference plans (see ORIGINAL_PLAN_RULES in
+       generate-concept/index.ts). Kept as their own tokens rather than
+       reusing --accent/--danger etc. since these must visually match the
+       actual plan line colors, independent of the app's own UI palette. */
+    --legend-magenta: #E93FA6;
+    --legend-yellow: #E8C547;
+    --legend-green: #4CAF6D;
+    --legend-orange: #E8863A;
+    --legend-red: #E3564D;
+    --legend-blue: #4C8FE3;
   }
 
   * { box-sizing: border-box; }
@@ -524,6 +536,126 @@
     font-family: 'JetBrains Mono', monospace;
     font-size: 11.5px;
     color: var(--muted);
+  }
+
+  /* ============================================================
+     PLAN LEGEND — collapsible reference showing what each line
+     color/style on an uploaded plan means to the generator.
+     Sits inside the "Reference (optional)" panel, under the
+     dropzone/file-pin.
+     ============================================================ */
+
+  .legend {
+    margin-top: 16px;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    background: var(--panel-raised);
+    overflow: hidden;
+  }
+
+  .legend-toggle {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 12px 14px;
+    background: none;
+    border: none;
+    color: var(--paper-dim);
+    font-family: 'Inter', sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: color 0.2s var(--ease);
+  }
+  .legend-toggle:hover { color: var(--paper); }
+
+  .legend-toggle-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .legend-toggle-icon { width: 15px; height: 15px; flex-shrink: 0; }
+
+  .legend-chevron {
+    width: 15px; height: 15px;
+    flex-shrink: 0;
+    transition: transform 0.25s var(--ease);
+  }
+  .legend.open .legend-chevron { transform: rotate(180deg); }
+
+  .legend-body {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 0.25s var(--ease);
+  }
+  .legend.open .legend-body { grid-template-rows: 1fr; }
+
+  .legend-body > * { overflow: hidden; }
+
+  .legend-hint {
+    padding: 0 14px 10px;
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  .legend-grid {
+    display: flex;
+    flex-direction: column;
+    padding: 0 14px 14px;
+  }
+
+  .legend-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 8px 0;
+    border-top: 1px solid var(--line);
+  }
+  .legend-row:first-child { border-top: none; }
+
+  .legend-swatch {
+    flex-shrink: 0;
+    width: 34px;
+    height: 0;
+    margin-top: 9px;
+    border-top-width: 3px;
+    border-top-style: solid;
+  }
+  .legend-swatch.thin { border-top-width: 1.5px; }
+  .legend-swatch.thick { border-top-width: 3px; }
+  .legend-swatch.dashed { border-top-style: dashed; }
+  .legend-swatch.solid { border-top-style: solid; }
+
+  .legend-swatch.magenta { border-top-color: var(--legend-magenta); }
+  .legend-swatch.yellow  { border-top-color: var(--legend-yellow); }
+  .legend-swatch.green   { border-top-color: var(--legend-green); }
+  .legend-swatch.orange  { border-top-color: var(--legend-orange); }
+  .legend-swatch.red     { border-top-color: var(--legend-red); }
+  .legend-swatch.blue    { border-top-color: var(--legend-blue); }
+
+  .legend-swatch.shaded {
+    height: 8px;
+    margin-top: 5px;
+    background: rgba(76,175,109,0.18);
+  }
+
+  .legend-text { min-width: 0; }
+
+  .legend-label {
+    font-size: 13px;
+    color: var(--paper);
+    font-weight: 500;
+    margin-bottom: 2px;
+  }
+
+  .legend-desc {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
   }
 
   .status-strip {
