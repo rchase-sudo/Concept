@@ -8,6 +8,7 @@
     authError: "",
     authSuccess: "",
     authBusy: false,
+    destination: "drafted", // "drafted" | "proposal" — which app to land in after login
 
     sourceFile: null,
     sourcePreviewUrl: null,
@@ -271,6 +272,13 @@
               <input id="auth-password" type="password"
                 autocomplete="${isSignUp ? "new-password" : "current-password"}"
                 minlength="6" required />
+            </div>
+            <div class="field">
+              <label for="auth-destination">Sign in to</label>
+              <select id="auth-destination">
+                <option value="drafted" ${state.destination === "drafted" ? "selected" : ""}>Drafted — Concept Plan Generator</option>
+                <option value="proposal" ${state.destination === "proposal" ? "selected" : ""}>Proposal Generator</option>
+              </select>
             </div>
             <button type="submit" class="btn btn-primary auth-submit" ${state.authBusy ? "disabled" : ""}>
               ${state.authBusy
@@ -640,6 +648,13 @@
 
     const authForm = root.querySelector("#auth-form");
     if (authForm) authForm.addEventListener("submit", onAuthSubmit);
+
+    const destinationSelect = root.querySelector("#auth-destination");
+    if (destinationSelect) {
+      destinationSelect.addEventListener("change", () => {
+        state.destination = destinationSelect.value;
+      });
+    }
 
     const fileInput = root.querySelector("#file-input");
     if (fileInput) fileInput.addEventListener("change", (e) => {
@@ -1256,8 +1271,9 @@
   // Boot
   // ---------------------------------------------------------------
 
-  const PAID_REDIRECT_URL   = "https://rchase-sudo.github.io/Concept/";
-  const UNPAID_REDIRECT_URL = "https://rchase-sudo.github.io/Upgrade/";
+  const PAID_REDIRECT_URL     = "https://rchase-sudo.github.io/Concept/";
+  const UNPAID_REDIRECT_URL   = "https://rchase-sudo.github.io/Upgrade/";
+  const PROPOSAL_REDIRECT_URL = "https://rchase-sudo.github.io/Proposal/";
 
   async function checkPaidStatusAndRoute(session) {
     if (!session) return;
@@ -1274,11 +1290,18 @@
       return;
     }
 
-    if (profile?.is_paid) {
+    if (!profile?.is_paid) {
+      window.location.href = UNPAID_REDIRECT_URL;
       return;
     }
 
-    window.location.href = UNPAID_REDIRECT_URL;
+    // Paid — route to whichever app the user selected on the login screen.
+    // Defaults to "drafted", which stays on this page (no redirect), matching
+    // existing behavior for anyone who never touched the dropdown.
+    if (state.destination === "proposal") {
+      window.location.href = PROPOSAL_REDIRECT_URL;
+      return;
+    }
   }
 
   async function init() {
