@@ -46,6 +46,8 @@
     // ---- Per-card 3-dot menu ----
     openMenuGenId: null,       // which history card's menu is open
     moveSubmenuOpen: false,    // whether the "move to folder" submenu is expanded
+    renamingGenId: null,       // which history card's title is being renamed inline
+    renameGenDraft: "",
 
     // ---- Plan legend ----
     legendOpen: false,
@@ -472,12 +474,20 @@
       ? `<img src="${item.result_url || item.signedUrl}" alt="" />`
       : `<span class="spin"></span>`;
     const menuOpen = state.openMenuGenId === item.id;
+    const isRenaming = state.renamingGenId === item.id;
+
+    // When actively renaming, the title turns into an input and the card
+    // body no longer opens the modal on click (so typing/selecting text
+    // doesn't accidentally trigger navigation).
+    const titleBlock = isRenaming
+      ? `<input class="gen-rename-input" data-gen-id="${item.id}" value="${escapeHtml(state.renameGenDraft)}" />`
+      : `<div class="title">${escapeHtml(item.title || item.prompt)}</div>`;
 
     return `
       <div class="history-card" draggable="true" data-action-drag="gen" data-gen-id="${item.id}">
         <div class="thumb-wrap" data-action="open-history" data-id="${item.id}">${thumb}</div>
-        <div class="body" data-action="open-history" data-id="${item.id}">
-          <div class="title">${escapeHtml(item.title || item.prompt)}</div>
+        <div class="body" ${isRenaming ? "" : `data-action="open-history" data-id="${item.id}"`}>
+          ${titleBlock}
           <div class="date">${formatDate(item.created_at)}</div>
           <span class="pill ${pillClass}">${escapeHtml(statusLabel(item.status))}</span>
         </div>
@@ -493,6 +503,7 @@
         ${canDownload
           ? `<button class="card-menu-item" data-action="menu-download" data-id="${item.id}">Download</button>`
           : ""}
+        <button class="card-menu-item" data-action="menu-rename" data-id="${item.id}">Rename</button>
         <button class="card-menu-item" data-action="menu-move-toggle" data-id="${item.id}">Move to folder ▸</button>
         ${state.moveSubmenuOpen ? renderMoveSubmenu(item) : ""}
         <div class="card-menu-divider"></div>
@@ -719,6 +730,29 @@
       });
     }
 
+    // ---- Inline history-card rename ----
+    const genRenameInput = root.querySelector(".gen-rename-input");
+    if (genRenameInput) {
+      genRenameInput.focus();
+      genRenameInput.select();
+      genRenameInput.addEventListener("click", (e) => e.stopPropagation());
+      genRenameInput.addEventListener("input", () => {
+        state.renameGenDraft = genRenameInput.value;
+      });
+      genRenameInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commitGenerationRename();
+        } else if (e.key === "Escape") {
+          state.renamingGenId = null;
+          render();
+        }
+      });
+      genRenameInput.addEventListener("blur", () => {
+        commitGenerationRename();
+      });
+    }
+
     // ---- Drag-and-drop: cards -> folders ----
     // IMPORTANT: dragover/dragleave toggle a class directly on the real DOM
     // node instead of going through state + render(). Calling render() mid-drag
@@ -866,6 +900,16 @@
         if (url) downloadFromUrl(url, `${slugify(item.title)}.png`);
         state.openMenuGenId = null;
         state.moveSubmenuOpen = false;
+        render();
+      },
+      "menu-rename": () => {
+        const id = e.currentTarget.dataset.id;
+        const item = state.history.find((h) => h.id === id);
+        if (!item) return;
+        state.openMenuGenId = null;
+        state.moveSubmenuOpen = false;
+        state.renamingGenId = id;
+        state.renameGenDraft = item.title || item.prompt || "";
         render();
       },
       "menu-move-toggle": () => {
@@ -1211,6 +1255,39 @@
     state.history = state.history.map((h) =>
       h.id === generationId ? { ...h, folder_id: folderId } : h
     );
+    render();
+  }
+
+  // ---------------------------------------------------------------
+  // Generations — rename
+  // ---------------------------------------------------------------
+
+  async function commitGenerationRename() {
+    const id = state.renamingGenId;
+    if (!id) return; // already committed (e.g. Enter then blur firing twice) -- no-op
+    const title = state.renameGenDraft.trim();
+    state.renamingGenId = null;
+    if (!title) { render(); return; }
+    await renameGeneration(id, title);
+  }
+
+  async function renameGeneration(id, title) {
+    const { data, error } = await sb
+      .from("generations")
+      .update({ title })
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error) {
+      state.errorMessage = `Could not rename concept: ${error.message}`;
+      render();
+      return;
+    }
+
+    state.history = state.history.map((h) => (h.id === id ? data : h));
+    if (state.currentGeneration?.id === id) state.currentGeneration = data;
+    if (state.modalGeneration?.id === id) state.modalGeneration = data;
     render();
   }
 
