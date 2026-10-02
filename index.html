@@ -24,6 +24,11 @@
     --muted: #8A8A92;
     --accent: #3ECF8E;
     --danger: #E05A4E;
+    /* Terminal-but-not-failed states (a concept flagged for human review):
+       neither the green of success nor the red of failure. Its own token
+       rather than borrowing --legend-yellow, since the legend colors have to
+       track actual plan line colors and must stay free to change with them. */
+    --warn: #E8C547;
     --radius: 14px;
     --ease: cubic-bezier(0.16, 1, 0.3, 1);
 
@@ -539,6 +544,120 @@
   }
 
   /* ============================================================
+     3D RENDER TOGGLE — opt-in second Gemini pass that turns the
+     finished concept plan into a photorealistic aerial render.
+     Styled as a row matching .parking-row so the two optional
+     controls read as a set.
+     ============================================================ */
+
+  .render3d-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 11px;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+    cursor: pointer;
+  }
+
+  .render3d-row input[type="checkbox"] {
+    appearance: none;
+    -webkit-appearance: none;
+    flex-shrink: 0;
+    width: 17px;
+    height: 17px;
+    margin: 1px 0 0;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--void);
+    cursor: pointer;
+    position: relative;
+    transition: all 0.2s var(--ease);
+  }
+  .render3d-row:hover input[type="checkbox"] { border-color: var(--paper-dim); }
+  .render3d-row input[type="checkbox"]:checked {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .render3d-row input[type="checkbox"]:checked::after {
+    content: "";
+    position: absolute;
+    left: 5px;
+    top: 2px;
+    width: 4px;
+    height: 8px;
+    border: solid var(--void);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+  .render3d-row input[type="checkbox"]:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .render3d-text { min-width: 0; }
+
+  .render3d-label {
+    font-size: 12.5px;
+    color: var(--paper);
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 3px;
+  }
+
+  .render3d-desc {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  /* The render result sits in its own frame under the plan, with its
+     own status line, so a render that is still working (or that failed)
+     never blocks or obscures the finished plan above it. */
+  .render-block { margin-top: 22px; }
+
+  .render-block-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+
+  .render-block-title {
+    font-family: 'Fraunces', serif;
+    font-size: 19px;
+    font-weight: 500;
+  }
+
+  .render-pending {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 26px 18px;
+    background: var(--panel-raised);
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    font-size: 13.5px;
+    color: var(--muted);
+  }
+
+  .render-failed {
+    background: rgba(224,90,78,0.1);
+    border: 1px solid rgba(224,90,78,0.3);
+    color: #F0938A;
+    font-size: 13px;
+    padding: 14px 16px;
+    border-radius: 11px;
+    line-height: 1.5;
+  }
+
+  .pill.render3d { background: rgba(62,207,142,0.12); color: var(--accent); margin-left: 6px; }
+
+  /* ============================================================
      PLAN LEGEND — collapsible reference showing what each line
      color/style on an uploaded plan means to the generator.
      Sits inside the "Reference (optional)" panel, under the
@@ -693,6 +812,30 @@
 
   .status-strip.failed .status-dot { background: var(--danger); animation: none; }
   .status-strip.failed .status-tag { color: var(--danger); }
+
+  /* Flagged for human review — terminal, so the dot doesn't pulse, and the
+     strip stacks a reason list instead of sitting on one line. */
+  .status-strip.review {
+    align-items: flex-start;
+    background: rgba(232,197,71,0.07);
+    border-color: rgba(232,197,71,0.3);
+  }
+  .status-strip.review .status-dot { background: var(--warn); animation: none; margin-top: 5px; }
+  .status-strip.review .status-tag { color: var(--warn); display: block; margin-bottom: 5px; }
+  .status-strip.review .status-text { line-height: 1.55; }
+
+  .review-body { flex: 1; min-width: 0; }
+
+  .review-notes {
+    margin: 10px 0 0;
+    padding-left: 18px;
+    font-size: 13px;
+    color: var(--paper-dim);
+    line-height: 1.6;
+  }
+  .review-notes li { margin-bottom: 3px; }
+
+  .pill.review { background: rgba(232,197,71,0.12); color: var(--warn); }
 
   .result-panel {
     margin-top: 40px;
@@ -1066,3 +1209,4 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
 <script src="app.js"></script>
 </body>
 </html>
+
