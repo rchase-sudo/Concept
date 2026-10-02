@@ -26,10 +26,21 @@
     // required_parking_stalls.
     parkingSpaces: "",
 
+    // Optional 3D-render checkbox. When true, the `generations` row is
+    // inserted with want_3d_render = true, and once the plan itself finishes
+    // the finished plan image is sent back to Gemini (generate-render) to
+    // produce a photorealistic aerial render of that same footprint.
+    // State-backed for the same reason as promptText -- a re-render mid-typing
+    // must not silently uncheck it.
+    want3dRender: false,
+
     generating: false,
     errorMessage: "",
     currentGeneration: null,
     resultImageUrl: null,
+
+    // Signed URL for the 3D render of state.currentGeneration, when one exists.
+    renderImageUrl: null,
 
     history: [],
     historyLoading: true,
@@ -53,6 +64,11 @@
     legendOpen: false,
 
     _pollInterval: null,
+
+    // Generation ids whose generate-render call this page has already fired.
+    // The poll tick sees `status === "completed"` on every pass, so without
+    // this guard it would re-invoke the render function every 3 seconds.
+    _renderKicked: new Set(),
   };
 
   // ---------------------------------------------------------------
@@ -74,16 +90,64 @@
 
   function statusLabel(status) {
     return {
-      pending:   "Queued",
-      analyzing: "Analyzing reference",
-      rendering: "Rendering concept",
-      completed: "Complete",
-      failed:    "Failed",
+      pending:            "Queued",
+      analyzing:          "Analyzing reference",
+      rendering:          "Rendering concept",
+      regenerating:       "Revising after review",
+      completed:          "Complete",
+      failed:             "Failed",
+      needs_human_review: "Needs review",
     }[status] || status;
   }
 
+  // The three statuses generate-concept can finish on. "needs_human_review"
+  // belongs here: the pipeline has given up (every attempt was rejected by the
+  // review gate, or it stopped itself before the platform's wall-clock limit)
+  // and will never write to the row again, so polling it forever just burns
+  // requests. Keep this in sync with the terminal statuses in
+  // generate-concept/index.ts.
   function isTerminal(status) {
-    return status === "completed" || status === "failed";
+    return status === "completed" || status === "failed" || status === "needs_human_review";
+  }
+
+  // ---- 3D render pass ----
+  // render_status is independent of `status`: the plan can be complete while
+  // the render is still working, and a failed render never invalidates a
+  // perfectly good plan. null/undefined means "no render was requested".
+
+  function wantsRender(gen) {
+    return Boolean(gen && gen.want_3d_render);
+  }
+
+  // True while a requested render still owes us a result -- i.e. keep polling.
+  function isRenderPending(gen) {
+    if (!wantsRender(gen)) return false;
+    if (gen.render_path) return false;
+    return gen.render_status !== "failed";
+  }
+
+  // Signs a path in the `outputs` bucket. Both the plan and the 3D render
+  // live in that one bucket, so they share this helper (and the bucket's
+  // existing storage policies).
+  async function signOutputUrl(path, label) {
+    if (!path) return null;
+    const { data, error } = await sb.storage.from("outputs").createSignedUrl(path, 3600);
+    if (error) {
+      console.error(`Failed to create signed URL for ${label || "output"}:`, error.message, "path:", path);
+    }
+    return data?.signedUrl || null;
+  }
+
+  // Fires generate-render for a generation whose plan is done but whose
+  // render hasn't started. Safe to call repeatedly -- the _renderKicked guard
+  // keeps it to once per page load, and the edge function itself also no-ops
+  // if a render already exists.
+  function kickRender(generationId) {
+    if (!generationId || state._renderKicked.has(generationId)) return;
+    state._renderKicked.add(generationId);
+    invokeWithAuthRetry("generate-render", { generation_id: generationId }).catch((err) => {
+      console.warn("generate-render invoke finished with error (polling continues):", err?.message);
+    });
   }
 
   function slugify(str) {
@@ -194,27 +258,42 @@
         state.currentGeneration = data;
 
         if (data.status === "completed") {
-          stopPolling();
+          // The plan is finished, so the Generate button is freed up even if
+          // an opted-in 3D render is still working below.
           state.generating = false;
 
-          if (data.output_path) {
-            const { data: signed, error: signErr } = await sb.storage
-              .from("outputs")
-              .createSignedUrl(data.output_path, 3600);
-            if (signErr) {
-              console.error("Failed to create signed URL:", signErr.message, "bucket: outputs, path:", data.output_path);
-            }
-            state.resultImageUrl = signed?.signedUrl || null;
-          } else {
-            state.resultImageUrl = null;
+          // While a render is pending this branch runs on every 3s tick, so
+          // each URL is only signed the first time it becomes available.
+          if (!state.resultImageUrl) {
+            state.resultImageUrl = await signOutputUrl(data.output_path, "plan");
+          }
+          if (!state.renderImageUrl && data.render_path) {
+            state.renderImageUrl = await signOutputUrl(data.render_path, "3D render");
           }
 
-          refreshHistory();
-          render();
+          if (isRenderPending(data)) {
+            // Plan done, render still owed. Kick the second pass off (once)
+            // and keep polling so render_status/render_path land in the UI.
+            kickRender(data.id);
+            render();
+          } else {
+            stopPolling();
+            refreshHistory();
+            render();
+          }
         } else if (data.status === "failed") {
           stopPolling();
           state.generating   = false;
           state.errorMessage = data.error_message || "Generation failed.";
+          render();
+        } else if (data.status === "needs_human_review") {
+          // Terminal, but not a failure and not a success -- there's no image,
+          // so renderStatusStrip surfaces the reviewer's reasons instead.
+          // Deliberately NOT routed through state.errorMessage: this isn't an
+          // error, and the reasons are a list rather than one line.
+          stopPolling();
+          state.generating = false;
+          refreshHistory();
           render();
         } else {
           // still in progress, update status strip
@@ -389,7 +468,35 @@
 
   function renderStatusStrip() {
     const gen = state.currentGeneration;
-    if (!gen || isTerminal(gen.status)) return "";
+    if (!gen) return "";
+
+    // "needs_human_review" is terminal but produces no image, so it gets its
+    // own strip (which persists, unlike the in-progress one) carrying the
+    // review gate's actual reasons. Without this the run just goes quiet and
+    // the user is left with no result and no explanation.
+    if (gen.status === "needs_human_review") {
+      const notes = Array.isArray(gen.review_notes) ? gen.review_notes.filter(Boolean) : [];
+      return `
+        <div class="status-strip review">
+          <span class="status-dot"></span>
+          <div class="review-body">
+            <span class="status-tag">NEEDS REVIEW</span>
+            <div class="status-text">
+              This concept couldn't be auto-approved${
+                gen.retry_count ? ` after ${gen.retry_count + 1} attempts` : ""
+              } — it needs a look by hand. Adjust your description or reference and generate again.
+            </div>
+            ${notes.length
+              ? `<ul class="review-notes">${
+                  notes.map((n) => `<li>${escapeHtml(n)}</li>`).join("")
+                }</ul>`
+              : ""}
+          </div>
+          <button class="btn btn-ghost" data-action="dismiss-result">Start a new concept</button>
+        </div>`;
+    }
+
+    if (isTerminal(gen.status)) return "";
     return `
       <div class="status-strip">
         <span class="status-dot"></span>
@@ -415,6 +522,50 @@
             <a class="btn btn-ghost" href="${state.resultImageUrl}" target="_blank" rel="noopener">Open full size</a>
           </div>
         </div>
+        ${renderRenderBlock(gen, state.renderImageUrl)}
+      </div>`;
+  }
+
+  // The 3D render block — only present when the generation actually asked for
+  // one. Three shapes: finished (image + downloads), still working (spinner),
+  // or failed (message, with the plan above left untouched).
+  function renderRenderBlock(gen, renderUrl, scope = "result") {
+    if (!wantsRender(gen)) return "";
+
+    // The modal reads its image off state.modalGeneration while the result
+    // panel reads state.currentGeneration, so the download actions differ.
+    const pngAction = scope === "modal" ? "modal-download-render-png" : "download-render-png";
+    const pdfAction = scope === "modal" ? "modal-download-render-pdf" : "download-render-pdf";
+
+    let body;
+    if (renderUrl) {
+      body = `
+        <div class="result-frame">
+          <img src="${renderUrl}" alt="3D aerial render" />
+          <div class="result-actions">
+            <button class="btn btn-primary" data-action="${pngAction}">Download PNG</button>
+            <button class="btn" data-action="${pdfAction}">Download PDF</button>
+            <a class="btn btn-ghost" href="${renderUrl}" target="_blank" rel="noopener">Open full size</a>
+          </div>
+        </div>`;
+    } else if (gen.render_status === "failed") {
+      body = `<div class="render-failed">
+          3D render failed — your concept plan above is unaffected.
+          ${gen.render_error ? `<br><br>${escapeHtml(gen.render_error)}` : ""}
+        </div>`;
+    } else {
+      body = `<div class="render-pending">
+          <span class="spin"></span>
+          Building a photorealistic aerial render from the plan above. This usually takes a minute.
+        </div>`;
+    }
+
+    return `
+      <div class="render-block">
+        <div class="render-block-head">
+          <div class="render-block-title">3D Render</div>
+        </div>
+        ${body}
       </div>`;
   }
 
@@ -467,8 +618,9 @@
   // ---- History cards + 3-dot menu ----
 
   function renderHistoryCard(item) {
-    const pillClass = item.status === "completed" ? "complete"
-                    : item.status === "failed"    ? "failed"
+    const pillClass = item.status === "completed"          ? "complete"
+                    : item.status === "failed"             ? "failed"
+                    : item.status === "needs_human_review" ? "review"
                     : "pending";
     const thumb = item.result_url || item.signedUrl
       ? `<img src="${item.result_url || item.signedUrl}" alt="" />`
@@ -490,6 +642,11 @@
           ${titleBlock}
           <div class="date">${formatDate(item.created_at)}</div>
           <span class="pill ${pillClass}">${escapeHtml(statusLabel(item.status))}</span>
+          ${wantsRender(item) ? `<span class="pill render3d">${
+            item.render_path        ? "3D"
+            : item.render_status === "failed" ? "3D FAILED"
+            : "3D PENDING"
+          }</span>` : ""}
         </div>
         <button class="kebab-btn" data-action="toggle-card-menu" data-id="${item.id}" title="More options">⋯</button>
         ${menuOpen ? renderCardMenu(item) : ""}
@@ -498,10 +655,21 @@
 
   function renderCardMenu(item) {
     const canDownload = item.status === "completed" && (item.result_url || item.signedUrl);
+    // Only offered once the plan exists (it's the render's input) and the
+    // render still hasn't landed -- covers both an outright failure and a row
+    // left stuck in "rendering" by a function that died mid-flight.
+    const canRetryRender =
+      item.status === "completed" && item.output_path && wantsRender(item) && !item.render_path;
     return `
       <div class="card-menu" data-role="card-menu">
         ${canDownload
           ? `<button class="card-menu-item" data-action="menu-download" data-id="${item.id}">Download</button>`
+          : ""}
+        ${item.renderSignedUrl
+          ? `<button class="card-menu-item" data-action="menu-download-render" data-id="${item.id}">Download 3D render</button>`
+          : ""}
+        ${canRetryRender
+          ? `<button class="card-menu-item" data-action="menu-retry-render" data-id="${item.id}">Retry 3D render</button>`
           : ""}
         <button class="card-menu-item" data-action="menu-rename" data-id="${item.id}">Rename</button>
         <button class="card-menu-item" data-action="menu-move-toggle" data-id="${item.id}">Move to folder ▸</button>
@@ -592,6 +760,18 @@
                 class="parking-input" placeholder="e.g. 40"
                 value="${escapeHtml(state.parkingSpaces)}" />
             </div>
+            <label class="render3d-row" for="render3d-input">
+              <input id="render3d-input" type="checkbox" ${state.want3dRender ? "checked" : ""} />
+              <span class="render3d-text">
+                <span class="render3d-label">
+                  Also generate a 3D render <span class="optional-tag">optional</span>
+                </span>
+                <span class="render3d-desc">
+                  Sends the finished concept plan back through Gemini for a photorealistic
+                  aerial view of the same footprint, parking and access.
+                </span>
+              </span>
+            </label>
             <div class="generate-row">
               <span class="char-hint" data-role="char-hint">${state.promptText.length} characters</span>
               <button class="btn btn-primary" data-action="generate" ${state.generating ? "disabled" : ""}>
@@ -607,6 +787,22 @@
       </main>`;
   }
 
+  // What to show in the modal when a generation has no image. "Still rendering"
+  // is only true for the non-terminal statuses -- a failed or flagged run is
+  // finished and never getting one, so saying otherwise leaves the user waiting
+  // on something that will never arrive.
+  function modalEmptyMessage(gen) {
+    if (gen.status === "failed") {
+      return escapeHtml(gen.error_message || "Generation failed");
+    }
+    if (gen.status === "needs_human_review") {
+      const notes = Array.isArray(gen.review_notes) ? gen.review_notes.filter(Boolean) : [];
+      return "Couldn't be auto-approved — needs a look by hand." +
+        (notes.length ? `<br><br>${notes.map((n) => escapeHtml(n)).join("<br>")}` : "");
+    }
+    return "Still rendering…";
+  }
+
   function renderModal() {
     const gen = state.modalGeneration;
     if (!gen) return "";
@@ -619,11 +815,7 @@
             <div class="result-frame" style="border:none; border-radius:0;">
               ${imgUrl
                 ? `<img src="${imgUrl}" alt="" />`
-                : `<div class="empty-state">${
-                    gen.status === "failed"
-                      ? escapeHtml(gen.error_message || "Generation failed")
-                      : "Still rendering…"
-                  }</div>`}
+                : `<div class="empty-state">${modalEmptyMessage(gen)}</div>`}
             </div>
             <div style="padding:20px;">
               <div class="result-title" style="margin-bottom:8px;">${escapeHtml(gen.title || "Untitled Concept")}</div>
@@ -634,6 +826,7 @@
                   <button class="btn btn-primary" data-action="modal-download-png">Download PNG</button>
                   <button class="btn" data-action="modal-download-pdf">Download PDF</button>
                 </div>` : ""}
+              ${renderRenderBlock(gen, gen.renderSignedUrl || null, "modal")}
             </div>
           </div>
         </div>
@@ -691,6 +884,15 @@
     if (parkingInput) {
       parkingInput.addEventListener("input", () => {
         state.parkingSpaces = parkingInput.value;
+      });
+    }
+
+    // State-backed so a poll tick or token refresh mid-session can't quietly
+    // uncheck it between ticking the box and hitting Generate.
+    const render3dInput = root.querySelector("#render3d-input");
+    if (render3dInput) {
+      render3dInput.addEventListener("change", () => {
+        state.want3dRender = render3dInput.checked;
       });
     }
 
@@ -827,6 +1029,7 @@
       "dismiss-result": () => {
         state.currentGeneration = null;
         state.resultImageUrl    = null;
+        state.renderImageUrl    = null;
         render();
       },
       "download-png": () => {
@@ -837,6 +1040,16 @@
       "download-pdf": () => {
         if (state.resultImageUrl) {
           downloadAsPdf(state.resultImageUrl, state.currentGeneration?.title);
+        }
+      },
+      "download-render-png": () => {
+        if (state.renderImageUrl) {
+          downloadFromUrl(state.renderImageUrl, `${slugify(state.currentGeneration?.title)}-3d.png`);
+        }
+      },
+      "download-render-pdf": () => {
+        if (state.renderImageUrl) {
+          downloadAsPdf(state.renderImageUrl, `${slugify(state.currentGeneration?.title)}-3d`);
         }
       },
       "refresh-history": refreshHistory,
@@ -855,6 +1068,14 @@
         const gen    = state.modalGeneration;
         const imgUrl = gen?.result_url || gen?.signedUrl;
         if (imgUrl) downloadAsPdf(imgUrl, gen.title);
+      },
+      "modal-download-render-png": () => {
+        const gen = state.modalGeneration;
+        if (gen?.renderSignedUrl) downloadFromUrl(gen.renderSignedUrl, `${slugify(gen.title)}-3d.png`);
+      },
+      "modal-download-render-pdf": () => {
+        const gen = state.modalGeneration;
+        if (gen?.renderSignedUrl) downloadAsPdf(gen.renderSignedUrl, `${slugify(gen.title)}-3d`);
       },
 
       // ---- Plan legend ----
@@ -901,6 +1122,22 @@
         state.openMenuGenId = null;
         state.moveSubmenuOpen = false;
         render();
+      },
+      "menu-download-render": () => {
+        const id = e.currentTarget.dataset.id;
+        const item = state.history.find((h) => h.id === id);
+        if (item?.renderSignedUrl) {
+          downloadFromUrl(item.renderSignedUrl, `${slugify(item.title)}-3d.png`);
+        }
+        state.openMenuGenId = null;
+        state.moveSubmenuOpen = false;
+        render();
+      },
+      "menu-retry-render": () => {
+        const id = e.currentTarget.dataset.id;
+        state.openMenuGenId = null;
+        state.moveSubmenuOpen = false;
+        retryRender(id);
       },
       "menu-rename": () => {
         const id = e.currentTarget.dataset.id;
@@ -1030,11 +1267,12 @@
     state.generating     = true;
     state.errorMessage   = "";
     state.resultImageUrl = null;
+    state.renderImageUrl = null;
     render();
 
     try {
       const user = state.session.user;
-      await runGenerateConceptFlow(user, promptText, requiredParkingStalls);
+      await runGenerateConceptFlow(user, promptText, requiredParkingStalls, state.want3dRender);
     } catch (err) {
       console.error(err);
       stopPolling();
@@ -1047,7 +1285,7 @@
   // Creates the `generations` row and kicks off generate-concept. A new
   // concept always lands in "All concepts" (folder_id null) at creation
   // time -- moving it into a folder afterward is a separate action.
-  async function runGenerateConceptFlow(user, promptText, requiredParkingStalls = null) {
+  async function runGenerateConceptFlow(user, promptText, requiredParkingStalls = null, want3dRender = false) {
     let sourcePath   = null;
     const sourceKind = state.sourceFile ? state.sourceKind : null;
 
@@ -1082,6 +1320,9 @@
         source_kind: sourceKind,
         status:      "pending",
         required_parking_stalls: requiredParkingStalls,
+        // generate-render is chained off the plan's completion rather than
+        // called here -- it needs the finished plan image as its input.
+        want_3d_render: want3dRender,
       })
       .select()
       .single();
@@ -1101,6 +1342,8 @@
     state.sourceKind        = null;
     state.promptText        = "";
     state.parkingSpaces     = "";
+    state.renderImageUrl    = null;
+    state.want3dRender      = false;
 
     startPolling(gen.id);
     render();
@@ -1127,18 +1370,30 @@
     const items = data || [];
     await Promise.all(items.map(async (item) => {
       if (item.status === "completed" && item.output_path) {
-        const { data: signed, error: signErr } = await sb.storage
-          .from("outputs")
-          .createSignedUrl(item.output_path, 3600);
-        if (signErr) {
-          console.error("History signed URL failed for", item.id, ":", signErr.message, "path:", item.output_path);
-        }
-        item.signedUrl = signed?.signedUrl || null;
+        item.signedUrl = await signOutputUrl(item.output_path, `history plan ${item.id}`);
+      }
+      if (item.render_path) {
+        item.renderSignedUrl = await signOutputUrl(item.render_path, `history 3D render ${item.id}`);
       }
     }));
 
     state.history        = items;
     state.historyLoading = false;
+
+    // Catch-up sweep: a render is chained off the plan finishing, so if the
+    // tab was closed in between, nothing ever kicked it off. Rows left stuck
+    // mid-flight ("rendering") or outright failed are deliberately NOT retried
+    // here -- those get the explicit "Retry 3D render" menu action instead, so
+    // a hard-failing render can't silently re-bill on every page load.
+    items
+      .filter((item) =>
+        item.status === "completed" &&
+        item.output_path &&
+        wantsRender(item) &&
+        !item.render_path &&
+        !item.render_status)
+      .forEach((item) => kickRender(item.id));
+
     render();
   }
 
@@ -1291,6 +1546,48 @@
     render();
   }
 
+  // ---------------------------------------------------------------
+  // Generations — 3D render retry
+  // ---------------------------------------------------------------
+
+  // Clears whatever the last attempt left behind, then re-fires
+  // generate-render. The generation is pulled up into the result panel so the
+  // retry is visible (spinner, then the render) instead of happening silently
+  // somewhere down in the library.
+  async function retryRender(id) {
+    const item = state.history.find((h) => h.id === id);
+    if (!item) return;
+
+    const { data, error } = await sb
+      .from("generations")
+      .update({ render_status: null, render_error: null })
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error) {
+      state.errorMessage = `Could not restart the 3D render: ${error.message}`;
+      render();
+      return;
+    }
+
+    state.history = state.history.map((h) =>
+      h.id === id ? { ...data, signedUrl: h.signedUrl } : h
+    );
+
+    state.modalGeneration   = null;
+    state.currentGeneration = data;
+    state.resultImageUrl    = item.signedUrl || (await signOutputUrl(data.output_path, "plan"));
+    state.renderImageUrl    = null;
+
+    // Drop the once-per-page guard so this generation can be kicked again.
+    state._renderKicked.delete(id);
+    kickRender(id);
+
+    startPolling(id);
+    render();
+  }
+
   async function deleteGeneration(id) {
     const item = state.history.find((h) => h.id === id)
       || (state.modalGeneration?.id === id ? state.modalGeneration : null);
@@ -1301,6 +1598,13 @@
         await sb.storage.from("outputs").remove([item.output_path]);
       } catch (e) {
         console.warn("Failed to remove output file (non-fatal):", e);
+      }
+    }
+    if (item?.render_path) {
+      try {
+        await sb.storage.from("outputs").remove([item.render_path]);
+      } catch (e) {
+        console.warn("Failed to remove 3D render file (non-fatal):", e);
       }
     }
     if (item?.source_path) {
@@ -1406,6 +1710,8 @@
         state.currentFolderId   = null;
         state.currentGeneration = null;
         state.resultImageUrl    = null;
+        state.renderImageUrl    = null;
+        state._renderKicked.clear();
       }
       render();
       if (session) {
