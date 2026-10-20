@@ -119,11 +119,19 @@
     return Boolean(gen && gen.want_3d_render);
   }
 
+  // Terminal render statuses generate-render can finish on. "needs_human_review"
+  // means every attempt was rejected by the review gate -- the function has
+  // given up and will never write to the row again, so it must stop polling.
+  // Keep in sync with generate-render/index.ts.
+  function isRenderTerminal(renderStatus) {
+    return renderStatus === "completed" || renderStatus === "failed" || renderStatus === "needs_human_review";
+  }
+
   // True while a requested render still owes us a result -- i.e. keep polling.
   function isRenderPending(gen) {
     if (!wantsRender(gen)) return false;
     if (gen.render_path) return false;
-    return gen.render_status !== "failed";
+    return !isRenderTerminal(gen.render_status);
   }
 
   // Signs a path in the `outputs` bucket. Both the plan and the 3D render
@@ -553,6 +561,15 @@
           3D render failed — your concept plan above is unaffected.
           ${gen.render_error ? `<br><br>${escapeHtml(gen.render_error)}` : ""}
         </div>`;
+    } else if (gen.render_status === "needs_human_review") {
+      const notes = Array.isArray(gen.render_review_notes) ? gen.render_review_notes : [];
+      body = `<div class="render-failed">
+          3D render needs review — every attempt was rejected by the quality check.
+          Your concept plan above is unaffected. Use "Retry 3D render" from the card menu to try again.
+          ${notes.length
+            ? `<ul style="margin:10px 0 0 18px;padding:0;">${notes.map((n) => `<li>${escapeHtml(String(n))}</li>`).join("")}</ul>`
+            : ""}
+        </div>`;
     } else {
       body = `<div class="render-pending">
           <span class="spin"></span>
@@ -645,6 +662,7 @@
           ${wantsRender(item) ? `<span class="pill render3d">${
             item.render_path        ? "3D"
             : item.render_status === "failed" ? "3D FAILED"
+            : item.render_status === "needs_human_review" ? "3D REVIEW"
             : "3D PENDING"
           }</span>` : ""}
         </div>
