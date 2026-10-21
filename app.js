@@ -91,7 +91,7 @@
       const j = await api({ action: "status", job_id: state.jobId });
       const prev = state.job;
       const changed = force || !prev || prev.status !== j.status || prev.progress !== j.progress || prev.updated_at !== j.updated_at ||
-        prev.render_status !== j.render_status;
+        prev.render_status !== j.render_status || prev.package_status !== j.package_status;
       state.job = j;
       if (j.status === "awaiting_parcel" && state.sel.size === 0 && j.candidates?.length) state.sel = new Set([0]);
       if (changed) { renderMain(); if (prev?.status !== j.status) loadJobs(); }
@@ -105,7 +105,8 @@
     clearTimeout(pollTimer);
     const j = state.job;
     const renderPending = j && j.status === "layout_approved" && ["queued", "modeling", "rendering", "nanobanana", "compositing"].includes(j.render_status);
-    if (state.view === "job" && j && (WORKING.has(j.status) || renderPending)) pollTimer = setTimeout(() => refreshJob(), renderPending ? 6000 : 4000);
+    const pkgPending = j && ["queued", "researching", "writing", "typesetting"].includes(j.package_status);
+    if (state.view === "job" && j && (WORKING.has(j.status) || renderPending || pkgPending)) pollTimer = setTimeout(() => refreshJob(), renderPending || pkgPending ? 6000 : 4000);
   }
 
   // ------------------------------------------------------------- actions
@@ -151,6 +152,7 @@
       await api(body);
       if (state.job && body.action === "approve_zoning") { state.job.status = "zoning_approved"; state.job.progress = "Starting the layout"; }
       if (state.job && body.action === "approve_parcel") { state.job.status = "parcel_approved"; }
+      if (state.job && body.action === "package") { state.job.package_status = "queued"; }
       if (state.job && body.action === "rerun") { state.job.status = { parse: "parsing", ec: "building_ec", zoning: "researching_zoning", layout: "building_layout" }[body.step] || state.job.status; }
       state.busy = false; renderMain(); window.scrollTo({ top: 0, behavior: "smooth" });
       await refreshJob(true); loadJobs();
@@ -440,7 +442,24 @@
         ${renderImg || j.render_status === "failed" ? `<div class="row" style="margin-top:10px"><span class="note">${renderImg ? "Photoreal render (Nano Banana) of the 3D model" : ""}</span><span class="spacer"></span>
           <button class="btn sm" data-a="rerender" ${state.busy ? "disabled" : ""}>Re-render</button></div>` : ""}
       </div>`;
-    return `${renderCard}
+    const pkg = f.package?.["package.pdf"];
+    const PS = { queued: "Queued", researching: "Researching costs, rents, fees and permits", writing: "Running the proforma and writing the package",
+      typesetting: "Typesetting the PDF" }[j.package_status] || "";
+    const pkgName = (j.summary?.package_name) || fileName(j, "Package", "pdf");
+    if (pkg) dls.unshift(["Due diligence package (PDF)", pkg, pkgName]);
+    const pkgCard = !(approved && j.render_status === "completed") ? "" : `
+      <div class="card" style="padding:14px 16px;margin-bottom:16px">
+        <div class="row"><div><h3 style="margin:0">Due diligence package</h3>
+          <div class="note">Plan sheet (Exhibit A) + photoreal render (Exhibit B1), zoning, permitting roadmap, proforma, returns and residual land value.</div></div>
+          <span class="spacer"></span>
+          ${PS ? "" : pkg ? `<a class="btn primary sm" href="${pkg}" download="${esc(pkgName)}" target="_blank" rel="noopener">Download PDF</a>
+            <button class="btn sm" data-a="package" ${state.busy ? "disabled" : ""}>Rebuild</button>` :
+            `<button class="btn primary" data-a="package" ${state.busy ? "disabled" : ""}>${state.busy ? "Starting…" : "Build due diligence package"}</button>`}</div>
+        ${PS ? `<div class="working" style="padding:12px 0 0"><div class="spin"></div><div><div class="w1">${esc(PS)}</div>
+          <div class="w2">Web research, proforma and typesetting · about 4–8 minutes</div></div></div>` : ""}
+        ${j.package_status === "failed" ? `<div class="err-box" style="margin-top:10px">Package failed: ${esc(j.package_error || "unknown error")}</div>` : ""}
+      </div>`;
+    return `${pkgCard}${renderCard}
       <div class="card" style="padding:12px">${png ? `<img class="plan" src="${png}" data-a="zoom" data-src="${png}" alt="Concept plan">` : `<div class="note">Plan image missing.</div>`}</div>
       <div class="grid2" style="margin-top:16px">
         <div class="card">
@@ -552,6 +571,7 @@
       case "approvezoning": approveZoning(); break;
       case "approvelayout": act({ action: "approve_layout", job_id: state.jobId }); break;
       case "rerender": act({ action: "render", job_id: state.jobId }); break;
+      case "package": act({ action: "package", job_id: state.jobId }); break;
       case "retry": act({ action: "rerun", job_id: state.jobId, step: state.job.step || "parse" }); break;
       case "repick": state.error = ""; state.job.status = "awaiting_parcel"; renderMain(); break;
       case "editzoning": state.showZoningEditor = true; state.edit = null; if (state.job.status === "error") state.job.status = "awaiting_zoning"; renderMain(); break;
