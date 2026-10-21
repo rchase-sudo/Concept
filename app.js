@@ -143,7 +143,7 @@
     if (!buildings.length) { state.error = "Add at least one building."; renderMain(); return; }
     const program = { ...(state.job.program || {}), use: e.use, buildings, parking: { ...(state.job.program?.parking || {}), required: n(e.required), calc: e.calc } };
     state.showZoningEditor = false;
-    await act({ action: "approve_zoning", job_id: state.jobId, setbacks, parking_setbacks: pave, program });
+    await act({ action: "approve_zoning", job_id: state.jobId, setbacks, parking_setbacks: pave, program, drive_road: e.drive || null });
   }
 
   async function act(body) {
@@ -186,6 +186,7 @@
         depth_ft: b.depth_ft ?? "", stories: b.stories ?? 1, drive_thru: !!b.drive_thru })),
       required: prog.parking?.required ?? "",
       calc: prog.parking?.calc || prog.parking?.ratio_text || "",
+      drive: z.drive_road || "",   // "" = automatic (longest frontage)
     };
     state.editKey = key;
   }
@@ -401,6 +402,7 @@
               <div><span>Flood (SFHA)</span><b>${num(s.flood_sfha_acres, 2)} ac</b></div>
             </div>
           </div>
+          ${driveCard(j)}
         </div>
         <div>
           <div class="card">
@@ -442,6 +444,58 @@
           </div>
         </div>
       </div>`;
+  }
+
+  // Driveway road picker: the roads the parcel fronts, drawn on the aerial; the layout faces and connects to the pick
+  function driveCard(j) {
+    const R = j.summary?.front_roads || [];
+    if (!R.length) return "";
+    const e = state.edit, auto = R[0];
+    const opt = (key, label, sub) => `<label class="droad ${e.drive === key ? "on" : ""}">
+        <input type="radio" name="drive" value="${esc(key)}" ${e.drive === key ? "checked" : ""}>
+        <span><b>${esc(label)}</b><span class="note">${esc(sub)}</span></span></label>`;
+    return `
+      <div class="card">
+        <h3>Driveway</h3>
+        ${R.length > 1 ? `<div id="rmap" class="rmap"></div>` : ""}
+        <div class="droads">
+          ${opt("", "Automatic", `longest frontage · ${auto.name}`)}
+          ${R.map((r) => opt(r.key, r.name, `${r.class} · ${num(r.frontage_ft)} ft frontage`)).join("")}
+        </div>
+        <p class="note" style="margin:8px 0 0">${R.length > 1 ? "The layout faces this road and the driveway connects to its centerline. Click a road on the map or pick it here." : "Only one road touches the parcel, so the driveway connects to it."}</p>
+      </div>`;
+  }
+
+  function drawRoadMap(j) {
+    const el = document.getElementById("rmap");
+    const R = j.summary?.front_roads || [];
+    if (!el || !window.L || el._leaflet_id || R.length < 2) return;
+    const rm = L.map(el, { zoomControl: false, attributionControl: true, fadeAnimation: false, zoomAnimation: false });
+    const pg = j.parcel?.geometry;
+    let bounds = null;
+    try { if (pg) bounds = L.geoJSON(pg).getBounds(); } catch (_) {}
+    if (!bounds) bounds = L.latLngBounds(R.flatMap((r) => r.lines.flat()));
+    rm.fitBounds(bounds.pad(0.9));
+    L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+      maxZoom: 20, maxNativeZoom: 19, attribution: "Imagery © Esri" }).addTo(rm);
+    if (pg) L.geoJSON(pg, { style: () => ({ color: "#ff2b2b", weight: 2.5, fillColor: "#ff2b2b", fillOpacity: 0.12 }) }).addTo(rm);
+    const chosen = () => state.edit.drive || R[0].key;
+    const style = (k) => k === chosen() ? { color: "#2bff88", weight: 7, opacity: 0.95 } : { color: "#ffd400", weight: 4, opacity: 0.85, dashArray: "8 6" };
+    const lyrs = R.map((r) => {
+      const l = L.polyline(r.lines, style(r.key)).addTo(rm);
+      l.bindTooltip(`${esc(r.name)} · ${num(r.frontage_ft)} ft frontage`, { sticky: true });
+      l.on("click", () => pick(r.key));
+      return [r.key, l];
+    });
+    function pick(key) {
+      state.edit.drive = key;
+      lyrs.forEach(([k, l]) => { l.setStyle(style(k)); if (k === chosen()) l.bringToFront(); });
+      root.querySelectorAll(".droad").forEach((lab) => {
+        const inp = lab.querySelector("input"); inp.checked = inp.value === key; lab.classList.toggle("on", inp.checked); });
+    }
+    root.querySelectorAll('.droad input').forEach((inp) => inp.addEventListener("change", () => pick(inp.value)));
+    lyrs.forEach(([k, l]) => { if (k === chosen()) l.bringToFront(); });
+    setTimeout(() => { rm.invalidateSize(); rm.fitBounds(bounds.pad(0.45)); }, 50);   // card is laid out by now
   }
 
   function viewLayout(j) {
@@ -535,6 +589,13 @@
       });
     });
     if (j.status === "awaiting_parcel") drawMap(j);
+    if (main.querySelector(".droads")) {
+      drawRoadMap(j);
+      // single-road (no map) case: radios still update the choice
+      main.querySelectorAll(".droad input").forEach((inp) => inp.addEventListener("change", () => {
+        state.edit.drive = inp.value;
+        main.querySelectorAll(".droad").forEach((lab) => lab.classList.toggle("on", lab.querySelector("input").checked)); }));
+    }
   }
 
   function drawMap(j) {
