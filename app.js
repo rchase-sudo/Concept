@@ -291,16 +291,22 @@
   function viewParcel(j) {
     const c = j.candidates || [];
     const list = c.map((p, i) => `
-      <label class="cand ${state.sel.has(i) ? "sel" : ""}" data-i="${i}">
+      <label class="cand ${state.sel.has(i) ? "sel" : ""}" data-i="${i}" style="border-left:4px solid ${state.sel.has(i) ? "#ff2b2b" : "#ffd400"}">
         <input type="checkbox" ${state.sel.has(i) ? "checked" : ""} data-a="pick" data-i="${i}">
         <div>
           <div class="a">${num(p.acres, 2)} ac ${i === 0 ? `<span class="tag g">best match</span>` : ""}${p.assemblage ? `<span class="tag y">${p.parts || ""} parcels combined</span>` : ""}</div>
-          <div class="b">${esc(p.address || "No site address")}<br>${p.apn ? "APN " + esc(p.apn) : ""}${p.owner ? " · " + esc(p.owner) : ""}${p.zoning ? " · " + esc(p.zoning) : ""}</div>
+          <div class="b">${esc(p.address || "No site address")}${p.dist_m === 0 ? ` <span class="tag g">at the address</span>` : p.dist_m != null ? ` · ${num(p.dist_m)} m from the address` : ""}<br>${p.apn ? "APN " + esc(p.apn) : ""}${p.owner ? " · " + esc(p.owner) : ""}${p.zoning ? " · " + esc(p.zoning) : ""}</div>
         </div>
       </label>`).join("");
     return `
       <div class="grid2">
-        <div class="card" style="padding:12px"><div id="map"></div></div>
+        <div class="card" style="padding:12px"><div id="map"></div>
+          <div class="row note" style="margin-top:10px;gap:16px">
+            <span><span style="display:inline-block;width:12px;height:12px;border:2px solid #ff2b2b;background:rgba(255,43,43,.25);vertical-align:-2px"></span> Selected</span>
+            <span><span style="display:inline-block;width:12px;height:12px;border:2px dashed #ffd400;background:rgba(255,212,0,.12);vertical-align:-2px"></span> Other candidates</span>
+            <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#2f7bff;border:2px solid #fff;vertical-align:-1px"></span> Address location</span>
+            <span class="spacer"></span><span>Click a parcel to select it</span>
+          </div></div>
         <div class="card">
           <h3>Which parcel is the listing?</h3>
           <p class="note" style="margin:-6px 0 14px">Ranked by acreage, parcel ID, address and road frontage. Select more than one to combine
@@ -476,25 +482,30 @@
     (j.candidates || []).forEach((c, i) => {
       const lyr = L.geoJSON(c.geometry, { style: () => styleFor(i) });
       lyr.on("click", () => togglePick(i));
-      lyr.bindTooltip(`${num(c.acres, 2)} ac${c.apn ? " · " + esc(c.apn) : ""}`, { sticky: true });
+      lyr.bindTooltip(`${num(c.acres, 2)} ac${c.address ? " · " + esc(c.address) : ""}`, { sticky: true });
+      lyr.on("mouseover", () => lyr.setStyle({ weight: 4 }));
+      lyr.on("mouseout", () => lyr.setStyle(styleFor(i)));
       lyr.addTo(group);
       mapLayers[i] = lyr;
     });
-    if (j.geocode?.lat) L.circleMarker([j.geocode.lat, j.geocode.lon], { radius: 5, color: "#fff", weight: 2, fillColor: "#3ECF8E", fillOpacity: 1 })
-      .bindTooltip("Listing location").addTo(map);
+    if (j.geocode?.lat) L.circleMarker([j.geocode.lat, j.geocode.lon], { radius: 6, color: "#fff", weight: 2, fillColor: "#2f7bff", fillOpacity: 1 })
+      .bindTooltip(`Address location: ${esc(j.geocode.label || "")}`).addTo(map);
     const sel = [...state.sel].map((i) => mapLayers[i]).filter(Boolean);
     const target = sel.length ? L.featureGroup(sel) : group;
     try { map.fitBounds(target.getBounds().pad(0.6)); } catch (_) { map.setView([j.geocode?.lat || 37, j.geocode?.lon || -78], 16); }
   }
   function styleFor(i) {
+    // selected parcels red, the other candidates yellow, so you can see where every option sits on the aerial
     const on = state.sel.has(i);
-    return { color: on ? "#3ECF8E" : "#ff4fd8", weight: on ? 3 : 1.6, fillColor: on ? "#3ECF8E" : "#ff4fd8", fillOpacity: on ? 0.22 : 0.06, dashArray: on ? null : "4 4" };
+    return on ? { color: "#ff2b2b", weight: 3, fillColor: "#ff2b2b", fillOpacity: 0.22 }
+              : { color: "#ffd400", weight: 2, fillColor: "#ffd400", fillOpacity: 0.10, dashArray: "6 4" };
   }
   function togglePick(i) {
     state.sel.has(i) ? state.sel.delete(i) : state.sel.add(i);
     mapLayers.forEach((l, k) => l && l.setStyle(styleFor(k)));
     root.querySelectorAll(".cand").forEach((el) => {
-      const k = +el.dataset.i; el.classList.toggle("sel", state.sel.has(k)); el.querySelector("input").checked = state.sel.has(k); });
+      const k = +el.dataset.i; el.classList.toggle("sel", state.sel.has(k)); el.querySelector("input").checked = state.sel.has(k);
+      el.style.borderLeft = `4px solid ${state.sel.has(k) ? "#ff2b2b" : "#ffd400"}`; });
     const b = root.querySelector('[data-a="approveparcel"]');
     if (b) { b.disabled = !state.sel.size; b.textContent = `Confirm parcel${state.sel.size > 1 ? "s" : ""}`; }
   }
