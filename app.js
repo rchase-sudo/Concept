@@ -104,7 +104,7 @@
   function schedulePoll() {
     clearTimeout(pollTimer);
     const j = state.job;
-    const renderPending = j && j.status === "layout_approved" && ["queued", "modeling", "rendering", "nanobanana"].includes(j.render_status);
+    const renderPending = j && j.status === "layout_approved" && ["queued", "modeling", "rendering", "nanobanana", "compositing"].includes(j.render_status);
     if (state.view === "job" && j && (WORKING.has(j.status) || renderPending)) pollTimer = setTimeout(() => refreshJob(), renderPending ? 6000 : 4000);
   }
 
@@ -427,7 +427,7 @@
     const renderImg = R["render.png"] || R["render.jpg"];
     const model = R["model_front.png"];
     const RS = { queued: "Queued", modeling: "Building the 3D model", rendering: "Rendering the 3D model",
-      nanobanana: "Nano Banana is rendering the photoreal view", failed: "Render failed", completed: "Render ready" }[j.render_status] || "";
+      nanobanana: "Nano Banana is rendering the photoreal view", compositing: "Keeping the photoreal pass to your lot", failed: "Render failed", completed: "Render ready" }[j.render_status] || "";
     if (renderImg) dls.unshift(["Render (photoreal)", renderImg, fileName(j, "Render", R["render.jpg"] ? "jpg" : "png")]);
     if (model) dls.push(["3D model view", model, fileName(j, "3D Model", "png")]);
     const renderCard = !approved ? "" : `
