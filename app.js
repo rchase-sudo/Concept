@@ -89,7 +89,8 @@
     try {
       const j = await api({ action: "status", job_id: state.jobId });
       const prev = state.job;
-      const changed = force || !prev || prev.status !== j.status || prev.progress !== j.progress || prev.updated_at !== j.updated_at;
+      const changed = force || !prev || prev.status !== j.status || prev.progress !== j.progress || prev.updated_at !== j.updated_at ||
+        prev.render_status !== j.render_status;
       state.job = j;
       if (j.status === "awaiting_parcel" && state.sel.size === 0 && j.candidates?.length) state.sel = new Set([0]);
       if (changed) { renderMain(); if (prev?.status !== j.status) loadJobs(); }
@@ -101,7 +102,9 @@
 
   function schedulePoll() {
     clearTimeout(pollTimer);
-    if (state.view === "job" && state.job && WORKING.has(state.job.status)) pollTimer = setTimeout(() => refreshJob(), 4000);
+    const j = state.job;
+    const renderPending = j && j.status === "layout_approved" && ["queued", "modeling", "rendering", "nanobanana"].includes(j.render_status);
+    if (state.view === "job" && j && (WORKING.has(j.status) || renderPending)) pollTimer = setTimeout(() => refreshJob(), renderPending ? 6000 : 4000);
   }
 
   // ------------------------------------------------------------- actions
@@ -396,7 +399,24 @@
       ["Aerial (JPG + JGW)", f.ec?.["aerial.jpg"], fileName(j, "Aerial", "jpg")],
     ].filter((d) => d[1]);
     const approved = j.status === "layout_approved";
-    return `
+    const R = f.render || {};
+    const renderImg = R["render.png"] || R["render.jpg"];
+    const model = R["model_front.png"];
+    const RS = { queued: "Queued", modeling: "Building the 3D model", rendering: "Rendering the 3D model",
+      nanobanana: "Nano Banana is rendering the photoreal view", failed: "Render failed", completed: "Render ready" }[j.render_status] || "";
+    if (renderImg) dls.unshift(["Render (photoreal)", renderImg, fileName(j, "Render", R["render.jpg"] ? "jpg" : "png")]);
+    if (model) dls.push(["3D model view", model, fileName(j, "3D Model", "png")]);
+    const renderCard = !approved ? "" : `
+      <div class="card" style="padding:12px;margin-bottom:16px">
+        ${renderImg ? `<img class="plan" src="${renderImg}" data-a="zoom" data-src="${renderImg}" alt="Render">` :
+          j.render_status === "failed" ? `<div class="err-box">Render failed: ${esc(j.render_error || "unknown error")}</div>` :
+          `<div class="working" style="padding:14px"><div class="spin"></div><div><div class="w1">${esc(RS || "Starting the render")}</div>
+            <div class="w2">3D model in Blender, then the Nano Banana photoreal pass · about 3–8 minutes</div></div></div>
+           ${model ? `<img class="plan" src="${model}" data-a="zoom" data-src="${model}" alt="3D model" style="margin-top:10px">` : ""}`}
+        ${renderImg || j.render_status === "failed" ? `<div class="row" style="margin-top:10px"><span class="note">${renderImg ? "Photoreal render (Nano Banana) of the 3D model" : ""}</span><span class="spacer"></span>
+          <button class="btn sm" data-a="rerender" ${state.busy ? "disabled" : ""}>Re-render</button></div>` : ""}
+      </div>`;
+    return `${renderCard}
       <div class="card" style="padding:12px">${png ? `<img class="plan" src="${png}" data-a="zoom" data-src="${png}" alt="Concept plan">` : `<div class="note">Plan image missing.</div>`}</div>
       <div class="grid2" style="margin-top:16px">
         <div class="card">
@@ -419,7 +439,7 @@
           <div class="row" style="margin-top:18px">
             <button class="btn" data-a="editzoning">Adjust zoning / program</button>
             <span class="spacer"></span>
-            ${approved ? `<span class="tag g">Approved</span>` : `<button class="btn primary" data-a="approvelayout" ${state.busy ? "disabled" : ""}>Approve layout</button>`}
+            ${approved ? `<span class="tag g">Approved</span>` : `<button class="btn primary" data-a="approvelayout" ${state.busy ? "disabled" : ""}>Approve layout &amp; render</button>`}
           </div>
         </div>
       </div>`;
@@ -494,6 +514,7 @@
       case "approveparcel": approveParcel(); break;
       case "approvezoning": approveZoning(); break;
       case "approvelayout": act({ action: "approve_layout", job_id: state.jobId }); break;
+      case "rerender": act({ action: "render", job_id: state.jobId }); break;
       case "retry": act({ action: "rerun", job_id: state.jobId, step: state.job.step || "parse" }); break;
       case "repick": state.error = ""; state.job.status = "awaiting_parcel"; renderMain(); break;
       case "editzoning": state.showZoningEditor = true; state.edit = null; if (state.job.status === "error") state.job.status = "awaiting_zoning"; renderMain(); break;
