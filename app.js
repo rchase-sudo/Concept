@@ -1,1744 +1,579 @@
-// app.js
+// app.js — Drafted concept generator, front end for the Forma concept pipeline
+// Backend: Supabase edge function `pipeline` (start / approve_parcel / approve_zoning / approve_layout / rerun / status / list / delete)
+// Flow: paste listing -> confirm parcel -> confirm zoning, setbacks, program -> review layout -> approve.
 (() => {
   const root = document.getElementById("root");
 
   const state = {
     session: null,
-    authMode: "signin",
-    authError: "",
-    authSuccess: "",
-    authBusy: false,
-
-    sourceFile: null,
-    sourcePreviewUrl: null,
-    sourceKind: null,
-
-    // The prompt textarea is state-backed instead of DOM-only. Previously
-    // its typed content lived nowhere except the live <textarea> node, so
-    // ANY re-render (a poll tick, a background auth token refresh, etc.)
-    // would silently wipe it. Storing it here means a re-render always
-    // redraws whatever was last typed, no matter what triggered the render.
-    promptText: "",
-
-    // Optional required-parking-stalls input. Blank string = no requirement
-    // (generate-concept behaves exactly as before). A positive integer here
-    // gets passed straight through to the `generations` row as
-    // required_parking_stalls.
-    parkingSpaces: "",
-
-    // Optional 3D-render checkbox. When true, the `generations` row is
-    // inserted with want_3d_render = true, and once the plan itself finishes
-    // the finished plan image is sent back to Gemini (generate-render) to
-    // produce a photorealistic aerial render of that same footprint.
-    // State-backed for the same reason as promptText -- a re-render mid-typing
-    // must not silently uncheck it.
-    want3dRender: false,
-
-    generating: false,
-    errorMessage: "",
-    currentGeneration: null,
-    resultImageUrl: null,
-
-    // Signed URL for the 3D render of state.currentGeneration, when one exists.
-    renderImageUrl: null,
-
-    history: [],
-    historyLoading: true,
-    modalGeneration: null,
-
-    // ---- Folders ----
-    folders: [],
-    foldersLoading: true,
-    currentFolderId: null,     // null = "All concepts"
-    renamingFolderId: null,    // folder currently being renamed inline
-    renameFolderDraft: "",
-    newFolderDraft: "",        // state-backed "new folder" input, same reasoning as promptText
-
-    // ---- Per-card 3-dot menu ----
-    openMenuGenId: null,       // which history card's menu is open
-    moveSubmenuOpen: false,    // whether the "move to folder" submenu is expanded
-    renamingGenId: null,       // which history card's title is being renamed inline
-    renameGenDraft: "",
-
-    // ---- Plan legend ----
-    legendOpen: false,
-
-    _pollInterval: null,
-
-    // Generation ids whose generate-render call this page has already fired.
-    // The poll tick sees `status === "completed"` on every pass, so without
-    // this guard it would re-invoke the render function every 3 seconds.
-    _renderKicked: new Set(),
+    authMode: "signin", authError: "", authNotice: "", authBusy: false,
+    jobs: [], jobsLoading: true,
+    view: "new",              // "new" | "job"
+    jobId: null,
+    job: null,                // full status payload
+    listingText: "",
+    busy: false,
+    error: "",
+    sel: new Set(),           // selected parcel candidate indexes
+    edit: null,               // zoning/program editor values for the open job
+    editKey: null,
+    showZoningEditor: false,  // re-open zoning editor from the layout screen
+    lightbox: null,
   };
+  let pollTimer = null, listTimer = null, map = null, mapLayers = [];
 
-  // ---------------------------------------------------------------
-  // Helpers
-  // ---------------------------------------------------------------
+  const WORKING = new Set(["queued", "parsing", "parcel_approved", "building_ec", "ec_ready", "researching_zoning", "zoning_approved", "building_layout"]);
+  const STEPS = ["Parcel", "Existing conditions", "Zoning & program", "Layout", "Approved"];
+  const STEP_OF = { queued: 0, parsing: 0, awaiting_parcel: 0, parcel_approved: 1, building_ec: 1, ec_ready: 2, researching_zoning: 2,
+    awaiting_zoning: 2, zoning_approved: 3, building_layout: 3, awaiting_layout: 3, layout_approved: 4 };
+  const ERR_STEP_IDX = { parse: 0, ec: 1, zoning: 2, layout: 3 };
+  const LABEL = { queued: "Queued", parsing: "Reading listing", awaiting_parcel: "Confirm parcel", parcel_approved: "Starting site survey",
+    building_ec: "Existing conditions", ec_ready: "Existing conditions ready", researching_zoning: "Researching zoning",
+    awaiting_zoning: "Confirm zoning & program", zoning_approved: "Starting layout", building_layout: "Laying out the site",
+    awaiting_layout: "Review layout", layout_approved: "Approved", error: "Error" };
 
-  function escapeHtml(str) {
-    return String(str ?? "").replace(/[&<>"']/g, (c) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-    }[c]));
+  // ------------------------------------------------------------- helpers
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const num = (v, d = 0) => (v === null || v === undefined || v === "" || isNaN(+v)) ? "—" : (+v).toLocaleString(undefined, { maximumFractionDigits: d });
+  const when = (iso) => { if (!iso) return ""; const d = new Date(iso);
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " · " + d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }); };
+  const dotClass = (st) => st === "error" ? "err" : st === "layout_approved" ? "ok" : (st || "").startsWith("awaiting") ? "wait" : "run";
+  function jobTitle(j) {
+    const L = j?.listing || j || {};
+    const street = L.street_address ? `${L.lot ? L.lot + ", " : ""}${L.street_address}` : null;
+    return street || [L.city, L.state].filter(Boolean).join(", ") || "New listing";
   }
-
-  function formatDate(iso) {
-    if (!iso) return "";
-    const d = new Date(iso);
-    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) +
-      " · " + d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  function jobPlace(j) { const L = j?.listing || j || {}; return [L.city, L.state].filter(Boolean).join(", "); }
+  function fileName(j, kind, ext) {
+    const base = jobTitle(j).replace(/[\\/:*?"<>|]+/g, " ").trim();
+    return `${base} - ${kind}.${ext}`;
   }
+  function dlUrl(url, name) { return url ? url + (url.includes("?") ? "&" : "?") + "download=" + encodeURIComponent(name) : null; }
 
-  function statusLabel(status) {
-    return {
-      pending:            "Queued",
-      analyzing:          "Analyzing reference",
-      rendering:          "Rendering concept",
-      regenerating:       "Revising after review",
-      completed:          "Complete",
-      failed:             "Failed",
-      needs_human_review: "Needs review",
-    }[status] || status;
-  }
-
-  // The three statuses generate-concept can finish on. "needs_human_review"
-  // belongs here: the pipeline has given up (every attempt was rejected by the
-  // review gate, or it stopped itself before the platform's wall-clock limit)
-  // and will never write to the row again, so polling it forever just burns
-  // requests. Keep this in sync with the terminal statuses in
-  // generate-concept/index.ts.
-  function isTerminal(status) {
-    return status === "completed" || status === "failed" || status === "needs_human_review";
-  }
-
-  // ---- 3D render pass ----
-  // render_status is independent of `status`: the plan can be complete while
-  // the render is still working, and a failed render never invalidates a
-  // perfectly good plan. null/undefined means "no render was requested".
-
-  function wantsRender(gen) {
-    return Boolean(gen && gen.want_3d_render);
-  }
-
-  // Terminal render statuses generate-render can finish on. "needs_human_review"
-  // means every attempt was rejected by the review gate -- the function has
-  // given up and will never write to the row again, so it must stop polling.
-  // Keep in sync with generate-render/index.ts.
-  function isRenderTerminal(renderStatus) {
-    return renderStatus === "completed" || renderStatus === "failed" || renderStatus === "needs_human_review";
-  }
-
-  // True while a requested render still owes us a result -- i.e. keep polling.
-  function isRenderPending(gen) {
-    if (!wantsRender(gen)) return false;
-    if (gen.render_path) return false;
-    return !isRenderTerminal(gen.render_status);
-  }
-
-  // Signs a path in the `outputs` bucket. Both the plan and the 3D render
-  // live in that one bucket, so they share this helper (and the bucket's
-  // existing storage policies).
-  async function signOutputUrl(path, label) {
-    if (!path) return null;
-    const { data, error } = await sb.storage.from("outputs").createSignedUrl(path, 3600);
-    if (error) {
-      console.error(`Failed to create signed URL for ${label || "output"}:`, error.message, "path:", path);
+  async function api(body) {
+    const { data: s } = await sb.auth.getSession();
+    let token = s?.session?.access_token;
+    const call = (t) => sb.functions.invoke("pipeline", { body, headers: t ? { Authorization: `Bearer ${t}` } : undefined });
+    let res = await call(token);
+    if (res.error && /401|auth/i.test(res.error.message || "")) {
+      const { data: r } = await sb.auth.refreshSession();
+      res = await call(r?.session?.access_token);
     }
-    return data?.signedUrl || null;
+    if (res.error) {
+      let msg = res.error.message || "Request failed";
+      try { const j = await res.error.context?.json?.(); if (j?.error) msg = j.error; } catch (_) {}
+      throw new Error(msg);
+    }
+    if (res.data?.error) throw new Error(res.data.error);
+    return res.data;
   }
 
-  // Fires generate-render for a generation whose plan is done but whose
-  // render hasn't started. Safe to call repeatedly -- the _renderKicked guard
-  // keeps it to once per page load, and the edge function itself also no-ops
-  // if a render already exists.
-  function kickRender(generationId) {
-    if (!generationId || state._renderKicked.has(generationId)) return;
-    state._renderKicked.add(generationId);
-    invokeWithAuthRetry("generate-render", { generation_id: generationId }).catch((err) => {
-      console.warn("generate-render invoke finished with error (polling continues):", err?.message);
-    });
+  // ------------------------------------------------------------- data
+  async function loadJobs() {
+    try { state.jobs = (await api({ action: "list", limit: 50 })).jobs || []; }
+    catch (e) { console.warn(e); }
+    state.jobsLoading = false;
+    renderSide();
   }
 
-  function slugify(str) {
-    return (str || "concept")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "concept";
+  async function openJob(id, { quiet = false } = {}) {
+    if (state.jobId !== id) { state.sel = new Set(); state.edit = null; state.editKey = null; state.showZoningEditor = false; state.job = null; }
+    state.view = "job"; state.jobId = id; state.error = "";
+    if (!quiet) render();
+    await refreshJob(true);
+    history.replaceState(null, "", `#job=${id}`);
   }
 
-  function blobToDataURL(blob) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-  }
-
-  function loadImageDims(dataUrl) {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.onload  = () => resolve(img);
-      img.onerror = reject;
-      img.src = dataUrl;
-    });
-  }
-
-  async function downloadFromUrl(url, filename) {
-    const resp = await fetch(url);
-    const blob = await resp.blob();
-    const blobUrl = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = blobUrl;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(blobUrl);
-  }
-
-  async function downloadAsPdf(url, title) {
-    const resp    = await fetch(url);
-    const blob    = await resp.blob();
-    const dataUrl = await blobToDataURL(blob);
-    const img     = await loadImageDims(dataUrl);
-    const { jsPDF } = window.jspdf;
-    const pdf = new jsPDF({
-      orientation: img.width >= img.height ? "landscape" : "portrait",
-      unit: "pt",
-      format: [img.width, img.height],
-    });
-    pdf.addImage(dataUrl, "PNG", 0, 0, img.width, img.height);
-    pdf.save(`${slugify(title)}.pdf`);
-  }
-
-  async function pdfFirstPageThumb(file) {
-    const buf      = await file.arrayBuffer();
-    const doc      = await pdfjsLib.getDocument({ data: buf }).promise;
-    const page     = await doc.getPage(1);
-    const viewport = page.getViewport({ scale: 0.4 });
-    const canvas   = document.createElement("canvas");
-    canvas.width   = viewport.width;
-    canvas.height  = viewport.height;
-    await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
-    return canvas.toDataURL("image/png");
-  }
-
-  async function pdfFirstPageToImageBlob(file, scale = 2.5) {
-    const buf      = await file.arrayBuffer();
-    const doc      = await pdfjsLib.getDocument({ data: buf }).promise;
-    const page     = await doc.getPage(1);
-    const viewport = page.getViewport({ scale });
-    const canvas   = document.createElement("canvas");
-    canvas.width   = viewport.width;
-    canvas.height  = viewport.height;
-    await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
-    return new Promise((resolve, reject) => {
-      canvas.toBlob((blob) => {
-        if (blob) resolve(blob);
-        else reject(new Error("Failed to render PDF page to image"));
-      }, "image/png");
-    });
-  }
-
-  // ---------------------------------------------------------------
-  // Polling — always the source of truth for completion
-  // ---------------------------------------------------------------
-
-  function stopPolling() {
-    if (state._pollInterval) {
-      clearInterval(state._pollInterval);
-      state._pollInterval = null;
+  async function refreshJob(force = false) {
+    if (!state.jobId) return;
+    try {
+      const j = await api({ action: "status", job_id: state.jobId });
+      const prev = state.job;
+      const changed = force || !prev || prev.status !== j.status || prev.progress !== j.progress || prev.updated_at !== j.updated_at;
+      state.job = j;
+      if (j.status === "awaiting_parcel" && state.sel.size === 0 && j.candidates?.length) state.sel = new Set([0]);
+      if (changed) { renderMain(); if (prev?.status !== j.status) loadJobs(); }
+      schedulePoll();
+    } catch (e) {
+      state.error = e.message; renderMain();
     }
   }
 
-  function startPolling(generationId) {
-    stopPolling();
-    state._pollInterval = setInterval(async () => {
-      try {
-        const { data, error } = await sb
-          .from("generations")
-          .select("*")
-          .eq("id", generationId)
-          .single();
-
-        if (error || !data) return;
-
-        state.currentGeneration = data;
-
-        if (data.status === "completed") {
-          // The plan is finished, so the Generate button is freed up even if
-          // an opted-in 3D render is still working below.
-          state.generating = false;
-
-          // While a render is pending this branch runs on every 3s tick, so
-          // each URL is only signed the first time it becomes available.
-          if (!state.resultImageUrl) {
-            state.resultImageUrl = await signOutputUrl(data.output_path, "plan");
-          }
-          if (!state.renderImageUrl && data.render_path) {
-            state.renderImageUrl = await signOutputUrl(data.render_path, "3D render");
-          }
-
-          if (isRenderPending(data)) {
-            // Plan done, render still owed. Kick the second pass off (once)
-            // and keep polling so render_status/render_path land in the UI.
-            kickRender(data.id);
-            render();
-          } else {
-            stopPolling();
-            refreshHistory();
-            render();
-          }
-        } else if (data.status === "failed") {
-          stopPolling();
-          state.generating   = false;
-          state.errorMessage = data.error_message || "Generation failed.";
-          render();
-        } else if (data.status === "needs_human_review") {
-          // Terminal, but not a failure and not a success -- there's no image,
-          // so renderStatusStrip surfaces the reviewer's reasons instead.
-          // Deliberately NOT routed through state.errorMessage: this isn't an
-          // error, and the reasons are a list rather than one line.
-          stopPolling();
-          state.generating = false;
-          refreshHistory();
-          render();
-        } else {
-          // still in progress, update status strip
-          render();
-        }
-      } catch (e) {
-        console.error("Poll error:", e);
-      }
-    }, 3000);
+  function schedulePoll() {
+    clearTimeout(pollTimer);
+    if (state.view === "job" && state.job && WORKING.has(state.job.status)) pollTimer = setTimeout(() => refreshJob(), 4000);
   }
 
-  // ---------------------------------------------------------------
-  // Render
-  // ---------------------------------------------------------------
+  // ------------------------------------------------------------- actions
+  async function startJob() {
+    const text = state.listingText.trim();
+    if (text.length < 40) { state.error = "Paste the full listing page (Ctrl+A, Ctrl+C on the listing, then paste here)."; renderMain(); return; }
+    state.busy = true; state.error = ""; renderMain();
+    try {
+      const { job_id } = await api({ action: "start", listing_text: text, source: "tool" });
+      state.listingText = "";
+      await loadJobs();
+      await openJob(job_id);
+    } catch (e) { state.error = e.message; }
+    state.busy = false; renderMain();
+  }
 
+  async function approveParcel() {
+    const idx = [...state.sel].sort((a, b) => a - b);
+    if (!idx.length) { state.error = "Select the parcel (or parcels) that make up the listing."; renderMain(); return; }
+    await act({ action: "approve_parcel", job_id: state.jobId, indexes: idx });
+  }
+
+  async function approveZoning() {
+    const e = state.edit;
+    const n = (v) => (v === "" || v === null || isNaN(+v)) ? null : +v;
+    const setbacks = { front: n(e.sb.front), side: n(e.sb.side), rear: n(e.sb.rear) };
+    const pave = { front: n(e.pv.front), side: n(e.pv.side), rear: n(e.pv.rear) };
+    if (Object.values(setbacks).some((v) => v === null) || Object.values(pave).some((v) => v === null)) {
+      state.error = "Fill in every building and pavement setback."; renderMain(); return;
+    }
+    const buildings = e.buildings.filter((b) => n(b.footprint_sf) > 0).map((b, i) => ({
+      name: b.name || `Building ${String.fromCharCode(65 + i)}`, use: b.use || b.label, label: b.label || b.use,
+      footprint_sf: n(b.footprint_sf), depth_ft: n(b.depth_ft) || 60, stories: n(b.stories) || 1, drive_thru: !!b.drive_thru }));
+    if (!buildings.length) { state.error = "Add at least one building."; renderMain(); return; }
+    const program = { ...(state.job.program || {}), use: e.use, buildings, parking: { ...(state.job.program?.parking || {}), required: n(e.required), calc: e.calc } };
+    state.showZoningEditor = false;
+    await act({ action: "approve_zoning", job_id: state.jobId, setbacks, parking_setbacks: pave, program });
+  }
+
+  async function act(body) {
+    state.busy = true; state.error = ""; renderMain();
+    try { await api(body); await refreshJob(true); loadJobs(); }
+    catch (e) { state.error = e.message; }
+    state.busy = false; renderMain();
+  }
+
+  async function deleteJob() {
+    if (!confirm("Delete this concept and its files?")) return;
+    try { await api({ action: "delete", job_id: state.jobId }); } catch (e) { alert(e.message); return; }
+    state.view = "new"; state.jobId = null; state.job = null; history.replaceState(null, "", "#");
+    await loadJobs(); render();
+  }
+
+  // ------------------------------------------------------------- zoning editor model
+  function ensureEditor(j) {
+    const key = j.id + "|" + (j.zoning?.researched_at || "") + "|" + JSON.stringify(j.program?.buildings || []).length;
+    if (state.edit && state.editKey === key) return;
+    const z = j.zoning || {}, sb = j.setbacks || z.setbacks_ft || {}, pv = z.pavement_setbacks_ft || {};
+    const prog = j.program || {};
+    state.edit = {
+      sb: { front: sb.front ?? "", side: sb.side ?? "", rear: sb.rear ?? "" },
+      pv: { front: pv.front ?? "", side: pv.side ?? "", rear: pv.rear ?? "" },
+      pvSrc: pv.source || {},
+      use: prog.use || "",
+      buildings: (prog.buildings || []).map((b) => ({ name: b.name || "", use: b.use || "", label: b.label || "", footprint_sf: b.footprint_sf ?? "",
+        depth_ft: b.depth_ft ?? "", stories: b.stories ?? 1, drive_thru: !!b.drive_thru })),
+      required: prog.parking?.required ?? "",
+      calc: prog.parking?.calc || prog.parking?.ratio_text || "",
+    };
+    state.editKey = key;
+  }
+
+  // ------------------------------------------------------------- render: shell
   function render() {
-    root.innerHTML = renderTopbar() + (state.session ? renderWorkspace() : renderAuth()) + renderModal();
-    attachListeners();
-  }
-
-  function renderTopbar() {
-    const right = state.session
-      ? `<div class="topbar-right">
-           <span class="user-email">${escapeHtml(state.session.user.email)}</span>
-           <button class="btn btn-ghost" data-action="sign-out">Sign out</button>
-         </div>`
-      : "";
-    return `
-      <header class="topbar">
-        <div class="brand"><span class="mark"></span> Drafted</div>
-        ${right}
-      </header>`;
-  }
-
-  function renderAuth() {
-    const isSignUp = state.authMode === "signup";
-    return `
-      <div class="auth-wrap">
-        <div class="auth-card">
-          <div class="auth-eyebrow">Concept Plan Generator</div>
-          <h1 class="auth-title">${isSignUp ? "Create your account" : "Welcome back"}</h1>
-          <p class="auth-sub">${isSignUp
-            ? "Sign up to start turning floor plans and sketches into rendered concepts."
-            : "Sign in to pick up where you left off."}</p>
-
-          ${state.authError   ? `<div class="auth-error">${escapeHtml(state.authError)}</div>`     : ""}
-          ${state.authSuccess ? `<div class="auth-success">${escapeHtml(state.authSuccess)}</div>` : ""}
-
-          <form id="auth-form">
-            <div class="field">
-              <label for="auth-email">Email</label>
-              <input id="auth-email" type="email" autocomplete="email" required />
-            </div>
-            <div class="field">
-              <label for="auth-password">Password</label>
-              <input id="auth-password" type="password"
-                autocomplete="${isSignUp ? "new-password" : "current-password"}"
-                minlength="6" required />
-            </div>
-            <button type="submit" class="btn btn-primary auth-submit" ${state.authBusy ? "disabled" : ""}>
-              ${state.authBusy
-                ? `<span class="spin"></span> Please wait`
-                : (isSignUp ? "Sign up" : "Sign in")}
-            </button>
-          </form>
-
-          <div class="auth-toggle">
-            ${isSignUp ? "Already have an account?" : "Don't have an account?"}
-            <button type="button" data-action="toggle-auth-mode">${isSignUp ? "Sign in" : "Sign up"}</button>
-          </div>
-        </div>
-      </div>`;
-  }
-
-  function renderDropzone() {
-    if (state.sourceFile) {
-      return `
-        <div class="dropzone" data-role="dropzone">
-          <input type="file" id="file-input" accept="image/*,application/pdf" />
-        </div>
-        <div class="file-pin">
-          <img class="thumb" src="${state.sourcePreviewUrl || ""}" alt="" />
-          <div class="meta">
-            <div class="name">${escapeHtml(state.sourceFile.name)}</div>
-            <div class="kind">${state.sourceKind === "pdf" ? "PDF" : "IMAGE"}</div>
-          </div>
-          <button class="remove" data-action="remove-file" title="Remove file">&times;</button>
-        </div>`;
+    if (!state.session) { renderAuth(); return; }
+    if (!root.querySelector(".shell")) {
+      root.innerHTML = `
+        <header class="topbar">
+          <div class="brand"><span class="mark"></span> Drafted <small>Concept plans</small></div>
+          <div class="topbar-right"><span>${esc(state.session.user.email)}</span><button class="btn sm ghost" data-a="signout">Sign out</button></div>
+        </header>
+        <div class="shell"><aside class="side" id="side"></aside><main id="main"></main></div>`;
     }
-    return `
-      <div class="dropzone" data-role="dropzone">
-        <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-          <path d="M12 16V4M12 4l-4 4M12 4l4 4" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        <div class="dropzone-text">Drop a floor plan, sketch, or photo</div>
-        <div class="dropzone-hint">PNG, JPG or PDF — optional</div>
-        <input type="file" id="file-input" accept="image/*,application/pdf" />
-      </div>`;
+    renderSide(); renderMain();
   }
 
-  // ---- Plan legend ----
-  // Static reference describing the line colors/styles a user's uploaded
-  // reference plan may use, and what each one is treated as by the pipeline
-  // (mirrors ORIGINAL_PLAN_RULES in the generate-concept edge function).
-  const LEGEND_ITEMS = [
-    {
-      swatchClass: "magenta thick solid",
-      label: "Property line",
-      desc: "No development is allowed outside this line, other than access to an existing road.",
-    },
-    {
-      swatchClass: "yellow thin dashed",
-      label: "Building setback line",
-      desc: "No development beyond this line, other than road access and proposed vegetation.",
-    },
-    {
-      swatchClass: "green thick dashed shaded",
-      label: "Wetland setback area",
-      desc: "No development or alteration inside this area, other than grading.",
-    },
-    {
-      swatchClass: "orange thin dashed",
-      label: "Pavement setback",
-      desc: "Nothing beyond this setback, other than vegetation.",
-    },
-    {
-      swatchClass: "red thick solid",
-      label: "Desired access road",
-      desc: "This location must be used for site access.",
-    },
-    {
-      swatchClass: "blue thick solid",
-      label: "Desired building location",
-      desc: "This location must be used for the proposed building — no other buildings may be added.",
-    },
-  ];
-
-  function renderLegendSwatch(swatchClass) {
-    return `<span class="legend-swatch ${swatchClass}"></span>`;
+  function renderSide() {
+    const side = root.querySelector("#side");
+    if (!side) return;
+    const items = state.jobs.map((j) => `
+      <button class="job-item ${j.id === state.jobId && state.view === "job" ? "active" : ""}" data-a="open" data-id="${j.id}">
+        <div class="t">${esc(jobTitle(j))}</div>
+        <div class="s"><span class="dot ${dotClass(j.status)}"></span>${esc(LABEL[j.status] || j.status)} · ${esc(when(j.created_at))}</div>
+      </button>`).join("");
+    side.innerHTML = `
+      <button class="btn primary" data-a="new" style="justify-content:center">+ New concept</button>
+      <h4>Concepts</h4>
+      ${state.jobsLoading ? `<div class="note" style="padding:6px">Loading…</div>` : items || `<div class="note" style="padding:6px">No concepts yet.</div>`}`;
   }
 
-  function renderLegend() {
-    const rows = LEGEND_ITEMS.map((item) => `
-      <div class="legend-row">
-        ${renderLegendSwatch(item.swatchClass)}
-        <div class="legend-text">
-          <div class="legend-label">${escapeHtml(item.label)}</div>
-          <div class="legend-desc">${escapeHtml(item.desc)}</div>
-        </div>
-      </div>`).join("");
+  function renderMain() {
+    const main = root.querySelector("#main");
+    if (!main) return;
+    if (map) { try { map.off(); map.remove(); } catch (_) {} map = null; }
+    if (state.view === "new") { main.innerHTML = viewNew(); bindNew(main); return; }
+    const j = state.job;
+    if (!j) { main.innerHTML = `<div class="card working"><div class="spin"></div><div><div class="w1">Loading…</div></div></div>`; return; }
+    main.innerHTML = viewJob(j);
+    bindJob(main, j);
+  }
 
+  // ------------------------------------------------------------- views
+  function viewNew() {
     return `
-      <div class="legend ${state.legendOpen ? "open" : ""}">
-        <button type="button" class="legend-toggle" data-action="toggle-legend" aria-expanded="${state.legendOpen}">
-          <span class="legend-toggle-label">
-            <svg class="legend-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
-              <path d="M4 6h16M4 12h16M4 18h10" stroke-linecap="round"/>
-            </svg>
-            Plan legend
-          </span>
-          <svg class="legend-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-            <path d="M6 9l6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </button>
-        <div class="legend-body">
-          <div class="legend-hint">If your uploaded reference uses these lines, this is how each one is read.</div>
-          <div class="legend-grid">${rows}</div>
+      <div class="eyebrow">New concept</div>
+      <h1 class="title">Paste the listing</h1>
+      <p class="sub">Open the listing (LoopNet, Crexi, MLS…), press <b>Ctrl+A</b> then <b>Ctrl+C</b>, and paste it below. The pipeline finds the parcel,
+        draws existing conditions on the aerial, researches zoning and setbacks, proposes a program and lays out the site. You confirm the parcel,
+        the zoning and the layout along the way.</p>
+      <div class="card" style="margin-top:22px">
+        <textarea class="listing" id="listing" placeholder="Paste the whole listing page here…">${esc(state.listingText)}</textarea>
+        ${state.error ? `<div class="err-box" style="margin-top:12px">${esc(state.error)}</div>` : ""}
+        <div class="row" style="margin-top:14px">
+          <span class="note">Tip: include the parcel ID / APN if the listing shows it — it pins the parcel instantly.</span>
+          <span class="spacer"></span>
+          <button class="btn primary" data-a="start" ${state.busy ? "disabled" : ""}>${state.busy ? "Starting…" : "Generate concept"}</button>
         </div>
       </div>`;
   }
 
-  function renderStatusStrip() {
-    const gen = state.currentGeneration;
-    if (!gen) return "";
-
-    // "needs_human_review" is terminal but produces no image, so it gets its
-    // own strip (which persists, unlike the in-progress one) carrying the
-    // review gate's actual reasons. Without this the run just goes quiet and
-    // the user is left with no result and no explanation.
-    if (gen.status === "needs_human_review") {
-      const notes = Array.isArray(gen.review_notes) ? gen.review_notes.filter(Boolean) : [];
-      return `
-        <div class="status-strip review">
-          <span class="status-dot"></span>
-          <div class="review-body">
-            <span class="status-tag">NEEDS REVIEW</span>
-            <div class="status-text">
-              This concept couldn't be auto-approved${
-                gen.retry_count ? ` after ${gen.retry_count + 1} attempts` : ""
-              } — it needs a look by hand. Adjust your description or reference and generate again.
-            </div>
-            ${notes.length
-              ? `<ul class="review-notes">${
-                  notes.map((n) => `<li>${escapeHtml(n)}</li>`).join("")
-                }</ul>`
-              : ""}
-          </div>
-          <button class="btn btn-ghost" data-action="dismiss-result">Start a new concept</button>
-        </div>`;
-    }
-
-    if (isTerminal(gen.status)) return "";
-    return `
-      <div class="status-strip">
-        <span class="status-dot"></span>
-        <span class="status-tag">${gen.status.toUpperCase()}</span>
-        <span class="status-text">${statusLabel(gen.status)}</span>
-      </div>`;
+  function stepper(j) {
+    const cur = j.status === "error" ? (ERR_STEP_IDX[j.step] ?? 0) : (STEP_OF[j.status] ?? 0);
+    return `<div class="stepper">${STEPS.map((s, i) => {
+      const cls = j.status === "layout_approved" || i < cur ? "done" : i === cur ? "now" : "";
+      return `<div class="step ${cls}"><span class="n">${String(i + 1).padStart(2, "0")}</span>${s}</div>`; }).join("")}</div>`;
   }
 
-  function renderResultPanel() {
-    const gen = state.currentGeneration;
-    if (!gen || gen.status !== "completed" || !state.resultImageUrl) return "";
+  function viewJob(j) {
+    const L = j.listing || {};
+    const facts = [L.acres && `${L.acres} ac`, L.zoning && `Zoned ${L.zoning}`, L.price && `$${num(L.price)}`].filter(Boolean).join(" · ");
+    let body = "";
+    if (j.status === "error") body = viewError(j);
+    else if (j.status === "awaiting_parcel") body = viewParcel(j);
+    else if (j.status === "awaiting_zoning" || (state.showZoningEditor && ["awaiting_layout", "layout_approved"].includes(j.status))) body = viewZoning(j);
+    else if (j.status === "awaiting_layout" || j.status === "layout_approved") body = viewLayout(j);
+    else body = viewWorking(j);
     return `
-      <div class="result-panel">
-        <div class="result-head">
-          <div class="result-title">${escapeHtml(gen.title || "Untitled Concept")}</div>
-          <button class="btn btn-ghost" data-action="dismiss-result">Start a new concept</button>
+      <div class="row"><div class="eyebrow">${esc(LABEL[j.status] || j.status)}</div><span class="spacer"></span>
+        <button class="btn sm danger" data-a="delete">Delete</button></div>
+      <h1 class="title">${esc(jobTitle(j))}</h1>
+      <div class="sub">${esc([jobPlace(j), facts].filter(Boolean).join(" — "))}</div>
+      ${stepper(j)}
+      ${state.error ? `<div class="err-box" style="margin-bottom:14px">${esc(state.error)}</div>` : ""}
+      ${body}`;
+  }
+
+  function viewWorking(j) {
+    const ec = j.files?.ec?.["existing_conditions.png"];
+    const msg = {
+      queued: "Queued — starting the worker", parsing: "Reading the listing and searching parcel records",
+      parcel_approved: "Pulling aerial imagery, wetlands, flood zones and roads", building_ec: "Building the existing-conditions drawing",
+      ec_ready: "Existing conditions done — starting zoning research", researching_zoning: "Researching the zoning ordinance and choosing a program",
+      zoning_approved: "Starting the layout", building_layout: "Laying out buildings, parking, landscaping and the plan sheet",
+    }[j.status] || j.progress;
+    return `
+      <div class="card working"><div class="spin"></div><div><div class="w1">${esc(msg)}</div>
+        <div class="w2">${esc(j.progress || "")} · usually 1–5 minutes · this page updates on its own</div></div></div>
+      ${ec ? `<div class="card"><h3>Existing conditions</h3><img class="plan" src="${ec}" data-a="zoom" data-src="${ec}" alt="Existing conditions"></div>` : ""}`;
+  }
+
+  function viewError(j) {
+    return `
+      <div class="card">
+        <h3>Something went wrong ${j.step ? `<span class="tag">step: ${esc(j.step)}</span>` : ""}</h3>
+        <div class="err-box">${esc(j.error || "Unknown error")}</div>
+        <div class="row" style="margin-top:14px">
+          <button class="btn primary" data-a="retry" ${state.busy ? "disabled" : ""}>Retry this step</button>
+          ${j.step === "layout" && j.zoning ? `<button class="btn" data-a="editzoning">Adjust zoning / program</button>` : ""}
+          ${j.candidates?.length && j.step !== "parse" ? `<button class="btn" data-a="repick">Pick a different parcel</button>` : ""}
         </div>
-        <div class="result-frame">
-          <img src="${state.resultImageUrl}" alt="${escapeHtml(gen.title || "Concept render")}" />
-          <div class="result-actions">
-            <button class="btn btn-primary" data-action="download-png">Download PNG</button>
-            <button class="btn" data-action="download-pdf">Download PDF</button>
-            <a class="btn btn-ghost" href="${state.resultImageUrl}" target="_blank" rel="noopener">Open full size</a>
-          </div>
+      </div>`;
+  }
+
+  function viewParcel(j) {
+    const c = j.candidates || [];
+    const list = c.map((p, i) => `
+      <label class="cand ${state.sel.has(i) ? "sel" : ""}" data-i="${i}">
+        <input type="checkbox" ${state.sel.has(i) ? "checked" : ""} data-a="pick" data-i="${i}">
+        <div>
+          <div class="a">${num(p.acres, 2)} ac ${i === 0 ? `<span class="tag g">best match</span>` : ""}${p.assemblage ? `<span class="tag y">${p.parts || ""} parcels combined</span>` : ""}</div>
+          <div class="b">${esc(p.address || "No site address")}<br>${p.apn ? "APN " + esc(p.apn) : ""}${p.owner ? " · " + esc(p.owner) : ""}${p.zoning ? " · " + esc(p.zoning) : ""}</div>
         </div>
-        ${renderRenderBlock(gen, state.renderImageUrl)}
-      </div>`;
-  }
-
-  // The 3D render block — only present when the generation actually asked for
-  // one. Three shapes: finished (image + downloads), still working (spinner),
-  // or failed (message, with the plan above left untouched).
-  function renderRenderBlock(gen, renderUrl, scope = "result") {
-    if (!wantsRender(gen)) return "";
-
-    // The modal reads its image off state.modalGeneration while the result
-    // panel reads state.currentGeneration, so the download actions differ.
-    const pngAction = scope === "modal" ? "modal-download-render-png" : "download-render-png";
-    const pdfAction = scope === "modal" ? "modal-download-render-pdf" : "download-render-pdf";
-
-    let body;
-    if (renderUrl) {
-      body = `
-        <div class="result-frame">
-          <img src="${renderUrl}" alt="3D aerial render" />
-          <div class="result-actions">
-            <button class="btn btn-primary" data-action="${pngAction}">Download PNG</button>
-            <button class="btn" data-action="${pdfAction}">Download PDF</button>
-            <a class="btn btn-ghost" href="${renderUrl}" target="_blank" rel="noopener">Open full size</a>
-          </div>
-        </div>`;
-    } else if (gen.render_status === "failed") {
-      body = `<div class="render-failed">
-          3D render failed — your concept plan above is unaffected.
-          ${gen.render_error ? `<br><br>${escapeHtml(gen.render_error)}` : ""}
-        </div>`;
-    } else if (gen.render_status === "needs_human_review") {
-      const notes = Array.isArray(gen.render_review_notes) ? gen.render_review_notes : [];
-      body = `<div class="render-failed">
-          3D render needs review — every attempt was rejected by the quality check.
-          Your concept plan above is unaffected. Use "Retry 3D render" from the card menu to try again.
-          ${notes.length
-            ? `<ul style="margin:10px 0 0 18px;padding:0;">${notes.map((n) => `<li>${escapeHtml(String(n))}</li>`).join("")}</ul>`
-            : ""}
-        </div>`;
-    } else {
-      body = `<div class="render-pending">
-          <span class="spin"></span>
-          Building a photorealistic aerial render from the plan above. This usually takes a minute.
-        </div>`;
-    }
-
+      </label>`).join("");
     return `
-      <div class="render-block">
-        <div class="render-block-head">
-          <div class="render-block-title">3D Render</div>
+      <div class="grid2">
+        <div class="card" style="padding:12px"><div id="map"></div></div>
+        <div class="card">
+          <h3>Which parcel is the listing?</h3>
+          <p class="note" style="margin:-6px 0 14px">Ranked by acreage, parcel ID, address and road frontage. Select more than one to combine
+            tax parcels into one site. ${L_acres(j)}</p>
+          ${list || `<div class="note">No candidates found.</div>`}
+          <div class="row" style="margin-top:10px"><span class="spacer"></span>
+            <button class="btn primary" data-a="approveparcel" ${state.busy || !state.sel.size ? "disabled" : ""}>Confirm parcel${state.sel.size > 1 ? "s" : ""}</button></div>
         </div>
-        ${body}
       </div>`;
   }
+  const L_acres = (j) => j.listing?.acres ? `Listing says <b>${esc(j.listing.acres)} ac</b>.` : "";
 
-  // ---- Folders ----
-
-  function renderFolderSidebar() {
-    const folderItems = state.folders.map(renderFolderItem).join("");
+  function viewZoning(j) {
+    ensureEditor(j);
+    const e = state.edit, z = j.zoning || {}, s = j.summary || {};
+    const ec = j.files?.ec?.["existing_conditions.png"];
+    const conf = z.confidence ? `<span class="tag ${z.confidence === "high" ? "g" : "y"}">${esc(z.confidence)} confidence</span>` : "";
+    const src = (k) => e.pvSrc?.[k] ? `<span class="tag ${e.pvSrc[k] === "ordinance" ? "g" : "y"}">${esc(e.pvSrc[k])}</span>` : "";
+    const sbRow = (lab, key, obj) => `<div>${lab}</div>` + ["front", "side", "rear"].map((k) =>
+      `<input class="fld" inputmode="decimal" data-bind="${obj}.${k}" value="${esc(e[obj][k])}">`).join("");
+    const bRows = e.buildings.map((b, i) => `
+      <tr>
+        <td><input class="fld" data-bind="buildings.${i}.label" value="${esc(b.label || b.use)}" placeholder="RETAIL"></td>
+        <td><input class="fld num" inputmode="numeric" data-bind="buildings.${i}.footprint_sf" value="${esc(b.footprint_sf)}"></td>
+        <td><input class="fld num" inputmode="numeric" data-bind="buildings.${i}.depth_ft" value="${esc(b.depth_ft)}"></td>
+        <td><input class="fld num" inputmode="numeric" data-bind="buildings.${i}.stories" value="${esc(b.stories)}" style="max-width:60px"></td>
+        <td style="text-align:center"><input type="checkbox" data-bind="buildings.${i}.drive_thru" ${b.drive_thru ? "checked" : ""} style="accent-color:var(--accent)"></td>
+        <td><button class="btn sm ghost" data-a="rmb" data-i="${i}" title="Remove">✕</button></td>
+      </tr>`).join("");
+    const uses = (z.uses || []).filter((u) => u.status === "permitted").slice(0, 14).map((u) => esc(u.use)).join(", ");
     return `
-      <aside class="folder-sidebar">
-        <div class="panel-label">Folders</div>
-        <div class="folder-list">
-          <div class="folder-item ${state.currentFolderId === null ? "active" : ""}"
-               data-action="select-folder" data-folder-id=""
-               data-role="folder-drop" data-drop-target="root">
-            <span class="folder-name">All concepts</span>
-          </div>
-          ${folderItems}
-        </div>
-        <form id="new-folder-form" class="new-folder-form">
-          <input id="new-folder-input" placeholder="New folder name" autocomplete="off"
-            value="${escapeHtml(state.newFolderDraft)}" />
-          <button type="submit" class="btn btn-ghost new-folder-btn" title="Add folder">+</button>
-        </form>
-      </aside>`;
-  }
-
-  function renderFolderItem(folder) {
-    const isActive = state.currentFolderId === folder.id;
-
-    if (state.renamingFolderId === folder.id) {
-      return `
-        <div class="folder-item renaming" data-role="folder-drop" data-drop-target="${folder.id}">
-          <input class="folder-rename-input" data-folder-id="${folder.id}"
-            value="${escapeHtml(state.renameFolderDraft)}" />
-        </div>`;
-    }
-
-    return `
-      <div class="folder-item ${isActive ? "active" : ""}"
-           data-action="select-folder" data-folder-id="${folder.id}"
-           data-role="folder-drop" data-drop-target="${folder.id}">
-        <span class="folder-name">${escapeHtml(folder.name)}</span>
-        <span class="folder-actions">
-          <button class="icon-btn" data-action="rename-folder" data-folder-id="${folder.id}" title="Rename">✎</button>
-          <button class="icon-btn" data-action="delete-folder" data-folder-id="${folder.id}" title="Delete">🗑</button>
-        </span>
-      </div>`;
-  }
-
-  // ---- History cards + 3-dot menu ----
-
-  function renderHistoryCard(item) {
-    const pillClass = item.status === "completed"          ? "complete"
-                    : item.status === "failed"             ? "failed"
-                    : item.status === "needs_human_review" ? "review"
-                    : "pending";
-    const thumb = item.result_url || item.signedUrl
-      ? `<img src="${item.result_url || item.signedUrl}" alt="" />`
-      : `<span class="spin"></span>`;
-    const menuOpen = state.openMenuGenId === item.id;
-    const isRenaming = state.renamingGenId === item.id;
-
-    // When actively renaming, the title turns into an input and the card
-    // body no longer opens the modal on click (so typing/selecting text
-    // doesn't accidentally trigger navigation).
-    const titleBlock = isRenaming
-      ? `<input class="gen-rename-input" data-gen-id="${item.id}" value="${escapeHtml(state.renameGenDraft)}" />`
-      : `<div class="title">${escapeHtml(item.title || item.prompt)}</div>`;
-
-    return `
-      <div class="history-card" draggable="true" data-action-drag="gen" data-gen-id="${item.id}">
-        <div class="thumb-wrap" data-action="open-history" data-id="${item.id}">${thumb}</div>
-        <div class="body" ${isRenaming ? "" : `data-action="open-history" data-id="${item.id}"`}>
-          ${titleBlock}
-          <div class="date">${formatDate(item.created_at)}</div>
-          <span class="pill ${pillClass}">${escapeHtml(statusLabel(item.status))}</span>
-          ${wantsRender(item) ? `<span class="pill render3d">${
-            item.render_path        ? "3D"
-            : item.render_status === "failed" ? "3D FAILED"
-            : item.render_status === "needs_human_review" ? "3D REVIEW"
-            : "3D PENDING"
-          }</span>` : ""}
-        </div>
-        <button class="kebab-btn" data-action="toggle-card-menu" data-id="${item.id}" title="More options">⋯</button>
-        ${menuOpen ? renderCardMenu(item) : ""}
-      </div>`;
-  }
-
-  function renderCardMenu(item) {
-    const canDownload = item.status === "completed" && (item.result_url || item.signedUrl);
-    // Only offered once the plan exists (it's the render's input) and the
-    // render still hasn't landed -- covers both an outright failure and a row
-    // left stuck in "rendering" by a function that died mid-flight.
-    const canRetryRender =
-      item.status === "completed" && item.output_path && wantsRender(item) && !item.render_path;
-    return `
-      <div class="card-menu" data-role="card-menu">
-        ${canDownload
-          ? `<button class="card-menu-item" data-action="menu-download" data-id="${item.id}">Download</button>`
-          : ""}
-        ${item.renderSignedUrl
-          ? `<button class="card-menu-item" data-action="menu-download-render" data-id="${item.id}">Download 3D render</button>`
-          : ""}
-        ${canRetryRender
-          ? `<button class="card-menu-item" data-action="menu-retry-render" data-id="${item.id}">Retry 3D render</button>`
-          : ""}
-        <button class="card-menu-item" data-action="menu-rename" data-id="${item.id}">Rename</button>
-        <button class="card-menu-item" data-action="menu-move-toggle" data-id="${item.id}">Move to folder ▸</button>
-        ${state.moveSubmenuOpen ? renderMoveSubmenu(item) : ""}
-        <div class="card-menu-divider"></div>
-        <button class="card-menu-item danger" data-action="menu-delete" data-id="${item.id}">Delete</button>
-      </div>`;
-  }
-
-  function renderMoveSubmenu(item) {
-    const noFolderRow = `
-      <button class="card-menu-item ${!item.folder_id ? "current" : ""}"
-        data-action="move-to-folder" data-id="${item.id}" data-folder-id="">No folder</button>`;
-    const folderRows = state.folders.map((f) => `
-      <button class="card-menu-item ${item.folder_id === f.id ? "current" : ""}"
-        data-action="move-to-folder" data-id="${item.id}" data-folder-id="${f.id}">${escapeHtml(f.name)}</button>`
-    ).join("");
-    return `<div class="card-submenu">${noFolderRow}${folderRows}</div>`;
-  }
-
-  function renderHistorySection() {
-    const filtered = state.currentFolderId === null
-      ? state.history
-      : state.history.filter((h) => h.folder_id === state.currentFolderId);
-
-    const folderName = state.currentFolderId === null
-      ? "All concepts"
-      : (state.folders.find((f) => f.id === state.currentFolderId)?.name || "Folder");
-
-    let body;
-    if (state.historyLoading) {
-      body = `<div class="empty-state"><span class="spin"></span></div>`;
-    } else if (filtered.length === 0) {
-      body = `<div class="empty-state">${
-        state.currentFolderId === null
-          ? "No concepts yet — generate your first one above."
-          : "No concepts in this folder yet — drag one here, or use a card's ⋯ menu."
-      }</div>`;
-    } else {
-      body = `<div class="history-grid">${filtered.map(renderHistoryCard).join("")}</div>`;
-    }
-
-    return `
-      <div class="history-section">
-        <div class="history-head">
-          <div class="panel-label">${escapeHtml(folderName)}</div>
-          <button class="btn btn-ghost" data-action="refresh-history">Refresh</button>
-        </div>
-        ${body}
-      </div>`;
-  }
-
-  function renderLibrarySection() {
-    return `
-      <div class="library-layout">
-        ${renderFolderSidebar()}
-        ${renderHistorySection()}
-      </div>`;
-  }
-
-  function renderWorkspace() {
-    return `
-      <main class="workspace">
-        <div class="workspace-head">
-          <div class="workspace-eyebrow">Concept Plan Generator</div>
-          <h1 class="workspace-title">Put your ideas to paper.</h1>
-          <p class="workspace-sub">Upload an EC Plan, sketch, or property image, describe your vision, and receive a rendered conceptual design.</p>
-        </div>
-
-        ${state.errorMessage
-          ? `<div class="auth-error" style="margin-bottom:20px;">${escapeHtml(state.errorMessage)}</div>`
-          : ""}
-
-        <div class="generator-grid">
-          <div class="panel">
-            <div class="panel-label">Reference (optional)</div>
-            ${renderDropzone()}
-            ${renderLegend()}
-          </div>
-          <div class="panel">
-            <div class="panel-label">Describe the concept</div>
-            <textarea class="prompt-box" placeholder="e.g. A detatched emergency Room with an ambulance drive thru">${escapeHtml(state.promptText)}</textarea>
-            <div class="parking-row">
-              <label for="parking-input" class="parking-label">
-                Required parking spaces <span class="optional-tag">optional</span>
-              </label>
-              <input id="parking-input" type="number" min="1" step="1"
-                class="parking-input" placeholder="e.g. 40"
-                value="${escapeHtml(state.parkingSpaces)}" />
-            </div>
-            <label class="render3d-row" for="render3d-input">
-              <input id="render3d-input" type="checkbox" ${state.want3dRender ? "checked" : ""} />
-              <span class="render3d-text">
-                <span class="render3d-label">
-                  Also generate a 3D render <span class="optional-tag">optional</span>
-                </span>
-                <span class="render3d-desc">
-                  Sends the finished concept plan back through Gemini for a photorealistic
-                  aerial view of the same footprint, parking and access.
-                </span>
-              </span>
-            </label>
-            <div class="generate-row">
-              <span class="char-hint" data-role="char-hint">${state.promptText.length} characters</span>
-              <button class="btn btn-primary" data-action="generate" ${state.generating ? "disabled" : ""}>
-                ${state.generating ? `<span class="spin"></span> Generating` : "Generate concept"}
-              </button>
+      <div class="grid2">
+        <div>
+          ${ec ? `<div class="card" style="padding:12px"><img class="plan" src="${ec}" data-a="zoom" data-src="${ec}" alt="Existing conditions"></div>` : ""}
+          <div class="card">
+            <h3>Site</h3>
+            <div class="kv">
+              <div><span>Parcel</span><b>${num(s.parcel_acres, 2)} ac</b></div>
+              <div><span>Buildable</span><b>${num(s.buildable_acres, 2)} ac</b></div>
+              <div><span>Usable from road</span><b>${num(s.frontage_buildable_acres, 2)} ac</b></div>
+              <div><span>Frontage</span><b>${num(s.frontage_ft)} ft</b></div>
+              <div><span>Wetlands</span><b>${num(s.wetland_acres, 2)} ac</b></div>
+              <div><span>Flood (SFHA)</span><b>${num(s.flood_sfha_acres, 2)} ac</b></div>
             </div>
           </div>
         </div>
-
-        ${renderStatusStrip()}
-        ${renderResultPanel()}
-        ${renderLibrarySection()}
-      </main>`;
-  }
-
-  // What to show in the modal when a generation has no image. "Still rendering"
-  // is only true for the non-terminal statuses -- a failed or flagged run is
-  // finished and never getting one, so saying otherwise leaves the user waiting
-  // on something that will never arrive.
-  function modalEmptyMessage(gen) {
-    if (gen.status === "failed") {
-      return escapeHtml(gen.error_message || "Generation failed");
-    }
-    if (gen.status === "needs_human_review") {
-      const notes = Array.isArray(gen.review_notes) ? gen.review_notes.filter(Boolean) : [];
-      return "Couldn't be auto-approved — needs a look by hand." +
-        (notes.length ? `<br><br>${notes.map((n) => escapeHtml(n)).join("<br>")}` : "");
-    }
-    return "Still rendering…";
-  }
-
-  function renderModal() {
-    const gen = state.modalGeneration;
-    if (!gen) return "";
-    const imgUrl = gen.result_url || gen.signedUrl || null;
-    return `
-      <div class="modal-backdrop" data-action="close-modal">
-        <div class="modal-card" data-role="modal-card">
-          <div style="position:relative;">
-            <button class="btn btn-ghost modal-close" data-action="close-modal">&times;</button>
-            <div class="result-frame" style="border:none; border-radius:0;">
-              ${imgUrl
-                ? `<img src="${imgUrl}" alt="" />`
-                : `<div class="empty-state">${modalEmptyMessage(gen)}</div>`}
+        <div>
+          <div class="card">
+            <h3>Zoning ${conf}</h3>
+            <div class="kv">
+              <div><span>District</span><b>${esc(z.district || "—")}</b></div>
+              <div><span>Jurisdiction</span><b style="font-size:13px">${esc((z.jurisdiction || "—").slice(0, 60))}</b></div>
+              <div><span>Max height</span><b>${z.max_height_ft ? num(z.max_height_ft) + " ft" : "—"}</b></div>
+              <div><span>Max coverage</span><b>${z.max_lot_coverage_pct ? num(z.max_lot_coverage_pct) + "%" : "—"}</b></div>
             </div>
-            <div style="padding:20px;">
-              <div class="result-title" style="margin-bottom:8px;">${escapeHtml(gen.title || "Untitled Concept")}</div>
-              <div class="date" style="margin-bottom:14px;">${formatDate(gen.created_at)}</div>
-              <div class="char-hint" style="white-space:normal; line-height:1.5;">${escapeHtml(gen.prompt)}</div>
-              ${imgUrl ? `
-                <div class="result-actions" style="padding:18px 0 0; border-top:none;">
-                  <button class="btn btn-primary" data-action="modal-download-png">Download PNG</button>
-                  <button class="btn" data-action="modal-download-pdf">Download PDF</button>
-                </div>` : ""}
-              ${renderRenderBlock(gen, gen.renderSignedUrl || null, "modal")}
+            <div style="margin-top:16px" class="sb-grid">
+              <div></div><div class="h">Front</div><div class="h">Side</div><div class="h">Rear</div>
+              ${sbRow("Building", "sb", "sb")}
+              ${sbRow("Pavement", "pv", "pv")}
+              <div></div><div>${src("front")}</div><div>${src("side")}</div><div>${src("rear")}</div>
             </div>
+            <p class="note" style="margin:10px 0 0">Pavement = closest parking or drive aisle to the property line (the driveway may cross it).</p>
+            ${uses ? `<details><summary>Permitted uses</summary><div class="notes">${uses}</div></details>` : ""}
+            ${z.notes || z.parking_setback_note ? `<details><summary>Research notes</summary><div class="notes">${esc([z.notes, z.parking_setback_note].filter(Boolean).join("\n\n"))}</div></details>` : ""}
+            ${(z.sources || []).length ? `<details><summary>Sources (${z.sources.length})</summary><div class="srcs">${z.sources.map((u) => `<a href="${esc(u)}" target="_blank" rel="noopener">${esc(u)}</a>`).join("")}</div></details>` : ""}
+          </div>
+          <div class="card">
+            <h3>Program</h3>
+            <input class="fld" data-bind="use" value="${esc(e.use)}" placeholder="Concept title (e.g. Retail / QSR)" style="margin-bottom:12px">
+            ${j.program?.rationale ? `<p class="note" style="margin:0 0 12px">${esc(j.program.rationale)}</p>` : ""}
+            <table class="ed"><thead><tr><th>Label</th><th>Footprint SF</th><th>Depth ft</th><th>Stories</th><th>Drive-thru</th><th></th></tr></thead>
+              <tbody>${bRows}</tbody></table>
+            <button class="btn sm" data-a="addb" style="margin-top:8px">+ Building</button>
+            <div class="row" style="margin-top:16px">
+              <div style="width:140px"><div class="note" style="margin-bottom:6px">Parking required</div>
+                <input class="fld num" inputmode="numeric" data-bind="required" value="${esc(e.required)}"></div>
+              <div style="flex:1;min-width:200px"><div class="note" style="margin-bottom:6px">Calculation</div>
+                <input class="fld" data-bind="calc" value="${esc(e.calc)}"></div>
+            </div>
+            <div class="row" style="margin-top:18px"><span class="spacer"></span>
+              ${state.showZoningEditor ? `<button class="btn ghost" data-a="canceledit">Cancel</button>` : ""}
+              <button class="btn primary" data-a="approvezoning" ${state.busy ? "disabled" : ""}>Generate layout</button></div>
           </div>
         </div>
       </div>`;
   }
 
-  // ---------------------------------------------------------------
-  // Listeners
-  // ---------------------------------------------------------------
+  function viewLayout(j) {
+    const m = j.layout || {}, f = j.files || {};
+    const png = f.layout?.["concept_plan.png"];
+    const dls = [
+      ["Concept plan (PDF)", f.layout?.["concept_plan.pdf"], fileName(j, "Concept Plan", "pdf")],
+      ["Concept plan (DXF)", f.layout?.["concept_layout.dxf"], fileName(j, "Concept Plan", "dxf")],
+      ["Existing conditions (PDF)", f.ec?.["existing_conditions.pdf"], fileName(j, "Existing Conditions", "pdf")],
+      ["Existing conditions (DXF)", f.ec?.["existing_conditions.dxf"], fileName(j, "Existing Conditions", "dxf")],
+      ["Aerial (JPG + JGW)", f.ec?.["aerial.jpg"], fileName(j, "Aerial", "jpg")],
+    ].filter((d) => d[1]);
+    const approved = j.status === "layout_approved";
+    return `
+      <div class="card" style="padding:12px">${png ? `<img class="plan" src="${png}" data-a="zoom" data-src="${png}" alt="Concept plan">` : `<div class="note">Plan image missing.</div>`}</div>
+      <div class="grid2" style="margin-top:16px">
+        <div class="card">
+          <h3>${esc(m.concept || j.program?.use || "Concept")}</h3>
+          <div class="kv">
+            <div><span>Building area</span><b>${num(m.gfa_sf)} SF</b></div>
+            <div><span>Parking</span><b>${num(m.stalls)} / ${num(m.stalls_required)} req.</b></div>
+            <div><span>Impervious</span><b>${num(m.impervious_pct, 1)}%</b></div>
+            <div><span>Lot coverage</span><b>${num(m.lot_coverage_pct, 1)}%</b></div>
+            <div><span>Development</span><b>${num(m.development_acres, 2)} ac</b></div>
+            <div><span>Remaining land</span><b>${num(m.remaining_developable_acres, 2)} ac</b></div>
+          </div>
+          ${(m.buildings || []).length ? `<div class="notes" style="margin-top:14px">${m.buildings.map((b) => `${esc((b.use || b.name || "").toString())} — ${num(b.w_ft)}' × ${num(b.d_ft)}' · ${num(b.footprint_sf)} SF${b.drive_thru ? " · drive-thru" : ""}`).join("\n")}</div>` : ""}
+          ${(m.warnings || []).length ? `<div class="warnings">${m.warnings.map((w) => `<div>⚠ ${esc(w)}</div>`).join("")}</div>` : ""}
+        </div>
+        <div class="card">
+          <h3>Downloads</h3>
+          <div class="dl">${dls.map(([lab, url, name]) => `<a class="btn sm" href="${dlUrl(url, name)}" target="_blank" rel="noopener">${esc(lab)}</a>`).join("")}</div>
+          <p class="note" style="margin-top:12px">Sheets are ANSI D (34×22). DXFs are in state-plane feet with Forma layers.</p>
+          <div class="row" style="margin-top:18px">
+            <button class="btn" data-a="editzoning">Adjust zoning / program</button>
+            <span class="spacer"></span>
+            ${approved ? `<span class="tag g">Approved</span>` : `<button class="btn primary" data-a="approvelayout" ${state.busy ? "disabled" : ""}>Approve layout</button>`}
+          </div>
+        </div>
+      </div>`;
+  }
 
-  function attachListeners() {
-    root.querySelectorAll("[data-action]").forEach((el) => {
-      el.addEventListener("click", onAction);
-    });
+  // ------------------------------------------------------------- bindings
+  function bindNew(main) {
+    const ta = main.querySelector("#listing");
+    ta.addEventListener("input", () => { state.listingText = ta.value; });
+    ta.focus();
+  }
 
-    const authForm = root.querySelector("#auth-form");
-    if (authForm) authForm.addEventListener("submit", onAuthSubmit);
-
-    const fileInput = root.querySelector("#file-input");
-    if (fileInput) fileInput.addEventListener("change", (e) => {
-      const file = e.target.files && e.target.files[0];
-      if (file) handleFileSelected(file);
-    });
-
-    const dropzone = root.querySelector('[data-role="dropzone"]');
-    if (dropzone) {
-      dropzone.addEventListener("click", (e) => {
-        if (e.target === dropzone) fileInput && fileInput.click();
-      });
-      dropzone.addEventListener("dragover", (e) => {
-        e.preventDefault();
-        dropzone.classList.add("drag-over");
-      });
-      dropzone.addEventListener("dragleave", () => dropzone.classList.remove("drag-over"));
-      dropzone.addEventListener("drop", (e) => {
-        e.preventDefault();
-        dropzone.classList.remove("drag-over");
-        const file = e.dataTransfer.files && e.dataTransfer.files[0];
-        if (file) handleFileSelected(file);
-      });
-    }
-
-    // The prompt textarea is state-backed so a later render() (poll tick,
-    // auth event, etc.) redraws whatever was actually typed instead of blank.
-    const promptBox = root.querySelector(".prompt-box");
-    const charHint  = root.querySelector('[data-role="char-hint"]');
-    if (promptBox && charHint) {
-      promptBox.addEventListener("input", () => {
-        state.promptText = promptBox.value;
-        charHint.textContent = `${promptBox.value.length} characters`;
-      });
-    }
-
-    const parkingInput = root.querySelector("#parking-input");
-    if (parkingInput) {
-      parkingInput.addEventListener("input", () => {
-        state.parkingSpaces = parkingInput.value;
-      });
-    }
-
-    // State-backed so a poll tick or token refresh mid-session can't quietly
-    // uncheck it between ticking the box and hitting Generate.
-    const render3dInput = root.querySelector("#render3d-input");
-    if (render3dInput) {
-      render3dInput.addEventListener("change", () => {
-        state.want3dRender = render3dInput.checked;
-      });
-    }
-
-    const modalCard = root.querySelector('[data-role="modal-card"]');
-    if (modalCard) modalCard.addEventListener("click", (e) => e.stopPropagation());
-
-    // ---- New-folder form ----
-    const newFolderForm = root.querySelector("#new-folder-form");
-    if (newFolderForm) newFolderForm.addEventListener("submit", onNewFolderSubmit);
-
-    const newFolderInput = root.querySelector("#new-folder-input");
-    if (newFolderInput) {
-      newFolderInput.addEventListener("input", () => {
-        state.newFolderDraft = newFolderInput.value;
-      });
-    }
-
-    // ---- Inline folder rename ----
-    const renameInput = root.querySelector(".folder-rename-input");
-    if (renameInput) {
-      renameInput.focus();
-      renameInput.select();
-      renameInput.addEventListener("input", () => {
-        state.renameFolderDraft = renameInput.value;
-      });
-      renameInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          commitFolderRename();
-        } else if (e.key === "Escape") {
-          state.renamingFolderId = null;
-          render();
-        }
-      });
-      renameInput.addEventListener("blur", () => {
-        commitFolderRename();
-      });
-    }
-
-    // ---- Inline history-card rename ----
-    const genRenameInput = root.querySelector(".gen-rename-input");
-    if (genRenameInput) {
-      genRenameInput.focus();
-      genRenameInput.select();
-      genRenameInput.addEventListener("click", (e) => e.stopPropagation());
-      genRenameInput.addEventListener("input", () => {
-        state.renameGenDraft = genRenameInput.value;
-      });
-      genRenameInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          commitGenerationRename();
-        } else if (e.key === "Escape") {
-          state.renamingGenId = null;
-          render();
-        }
-      });
-      genRenameInput.addEventListener("blur", () => {
-        commitGenerationRename();
-      });
-    }
-
-    // ---- Drag-and-drop: cards -> folders ----
-    // IMPORTANT: dragover/dragleave toggle a class directly on the real DOM
-    // node instead of going through state + render(). Calling render() mid-drag
-    // would replace the DOM (including the element being dragged) and silently
-    // cancel the native HTML5 drag operation. render() is only called from the
-    // `drop` handler below, which fires after the drag session has ended.
-    root.querySelectorAll('[data-action-drag="gen"]').forEach((el) => {
-      el.addEventListener("dragstart", (e) => {
-        e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("text/plain", el.dataset.genId);
-        el.classList.add("dragging");
-      });
-      el.addEventListener("dragend", () => {
-        el.classList.remove("dragging");
+  function bindJob(main, j) {
+    main.querySelectorAll("[data-bind]").forEach((el) => {
+      el.addEventListener(el.type === "checkbox" ? "change" : "input", () => {
+        const path = el.dataset.bind.split(".");
+        let o = state.edit;
+        for (let i = 0; i < path.length - 1; i++) o = o[path[i]];
+        o[path[path.length - 1]] = el.type === "checkbox" ? el.checked : el.value;
       });
     });
-
-    root.querySelectorAll('[data-role="folder-drop"]').forEach((el) => {
-      el.addEventListener("dragover", (e) => {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "move";
-        el.classList.add("drag-over");
-      });
-      el.addEventListener("dragleave", () => {
-        el.classList.remove("drag-over");
-      });
-      el.addEventListener("drop", (e) => {
-        e.preventDefault();
-        el.classList.remove("drag-over");
-        const genId = e.dataTransfer.getData("text/plain");
-        if (!genId) return;
-        const dropTarget = el.dataset.dropTarget;
-        const folderId = dropTarget === "root" ? null : dropTarget;
-        moveGenerationToFolder(genId, folderId);
-      });
-    });
+    if (j.status === "awaiting_parcel") drawMap(j);
   }
 
-  // Closes any open card menu when clicking outside it. Bound once, at
-  // module load (not inside attachListeners), so it never gets re-bound or
-  // duplicated across renders.
-  document.addEventListener("click", (e) => {
-    if (state.openMenuGenId === null) return;
-    const withinMenu = e.target.closest(".card-menu, .kebab-btn");
-    if (!withinMenu) {
-      state.openMenuGenId = null;
-      state.moveSubmenuOpen = false;
-      render();
+  function drawMap(j) {
+    const el = document.getElementById("map");
+    if (!el || !window.L) return;
+    if (el._leaflet_id) return;
+    map = L.map(el, { zoomControl: true, attributionControl: true, fadeAnimation: false, zoomAnimation: false });
+    L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+      maxZoom: 20, maxNativeZoom: 19, attribution: "Imagery © Esri, Maxar, Earthstar Geographics" }).addTo(map);
+    mapLayers = [];
+    const group = L.featureGroup().addTo(map);
+    (j.candidates || []).forEach((c, i) => {
+      const lyr = L.geoJSON(c.geometry, { style: () => styleFor(i) });
+      lyr.on("click", () => togglePick(i));
+      lyr.bindTooltip(`${num(c.acres, 2)} ac${c.apn ? " · " + esc(c.apn) : ""}`, { sticky: true });
+      lyr.addTo(group);
+      mapLayers[i] = lyr;
+    });
+    if (j.geocode?.lat) L.circleMarker([j.geocode.lat, j.geocode.lon], { radius: 5, color: "#fff", weight: 2, fillColor: "#3ECF8E", fillOpacity: 1 })
+      .bindTooltip("Listing location").addTo(map);
+    const sel = [...state.sel].map((i) => mapLayers[i]).filter(Boolean);
+    const target = sel.length ? L.featureGroup(sel) : group;
+    try { map.fitBounds(target.getBounds().pad(0.6)); } catch (_) { map.setView([j.geocode?.lat || 37, j.geocode?.lon || -78], 16); }
+  }
+  function styleFor(i) {
+    const on = state.sel.has(i);
+    return { color: on ? "#3ECF8E" : "#ff4fd8", weight: on ? 3 : 1.6, fillColor: on ? "#3ECF8E" : "#ff4fd8", fillOpacity: on ? 0.22 : 0.06, dashArray: on ? null : "4 4" };
+  }
+  function togglePick(i) {
+    state.sel.has(i) ? state.sel.delete(i) : state.sel.add(i);
+    mapLayers.forEach((l, k) => l && l.setStyle(styleFor(k)));
+    root.querySelectorAll(".cand").forEach((el) => {
+      const k = +el.dataset.i; el.classList.toggle("sel", state.sel.has(k)); el.querySelector("input").checked = state.sel.has(k); });
+    const b = root.querySelector('[data-a="approveparcel"]');
+    if (b) { b.disabled = !state.sel.size; b.textContent = `Confirm parcel${state.sel.size > 1 ? "s" : ""}`; }
+  }
+
+  // one delegated click handler
+  root.addEventListener("click", async (ev) => {
+    const t = ev.target.closest("[data-a]");
+    if (!t) return;
+    const a = t.dataset.a;
+    if (a === "pick") { ev.preventDefault(); togglePick(+t.dataset.i); return; }
+    if (t.classList.contains("cand")) return;
+    switch (a) {
+      case "signout": await sb.auth.signOut(); break;
+      case "new": state.view = "new"; state.jobId = null; state.job = null; state.error = ""; history.replaceState(null, "", "#"); clearTimeout(pollTimer); render(); break;
+      case "open": openJob(t.dataset.id); renderSide(); break;
+      case "start": startJob(); break;
+      case "approveparcel": approveParcel(); break;
+      case "approvezoning": approveZoning(); break;
+      case "approvelayout": act({ action: "approve_layout", job_id: state.jobId }); break;
+      case "retry": act({ action: "rerun", job_id: state.jobId, step: state.job.step || "parse" }); break;
+      case "repick": state.error = ""; state.job.status = "awaiting_parcel"; renderMain(); break;
+      case "editzoning": state.showZoningEditor = true; state.edit = null; if (state.job.status === "error") state.job.status = "awaiting_zoning"; renderMain(); break;
+      case "canceledit": state.showZoningEditor = false; renderMain(); break;
+      case "delete": deleteJob(); break;
+      case "addb": state.edit.buildings.push({ label: "", use: "", footprint_sf: "", depth_ft: 60, stories: 1, drive_thru: false }); renderMain(); break;
+      case "rmb": state.edit.buildings.splice(+t.dataset.i, 1); renderMain(); break;
+      case "zoom": openLightbox(t.dataset.src); break;
     }
   });
+  root.addEventListener("click", (ev) => {
+    const c = ev.target.closest(".cand");
+    if (c && !ev.target.closest("input")) { ev.preventDefault(); togglePick(+c.dataset.i); }
+  });
 
-  function onAction(e) {
-    const action = e.currentTarget.dataset.action;
-    const handlers = {
-      "toggle-auth-mode": () => {
-        state.authMode = state.authMode === "signin" ? "signup" : "signin";
-        state.authError   = "";
-        state.authSuccess = "";
-        render();
-      },
-      "sign-out": async () => {
-        stopPolling();
-        await sb.auth.signOut();
-      },
-      "remove-file": () => {
-        state.sourceFile       = null;
-        state.sourcePreviewUrl = null;
-        state.sourceKind       = null;
-        render();
-      },
-      "generate": handleGenerate,
-      "dismiss-result": () => {
-        state.currentGeneration = null;
-        state.resultImageUrl    = null;
-        state.renderImageUrl    = null;
-        render();
-      },
-      "download-png": () => {
-        if (state.resultImageUrl) {
-          downloadFromUrl(state.resultImageUrl, `${slugify(state.currentGeneration?.title)}.png`);
-        }
-      },
-      "download-pdf": () => {
-        if (state.resultImageUrl) {
-          downloadAsPdf(state.resultImageUrl, state.currentGeneration?.title);
-        }
-      },
-      "download-render-png": () => {
-        if (state.renderImageUrl) {
-          downloadFromUrl(state.renderImageUrl, `${slugify(state.currentGeneration?.title)}-3d.png`);
-        }
-      },
-      "download-render-pdf": () => {
-        if (state.renderImageUrl) {
-          downloadAsPdf(state.renderImageUrl, `${slugify(state.currentGeneration?.title)}-3d`);
-        }
-      },
-      "refresh-history": refreshHistory,
-      "open-history": () => {
-        const id   = e.currentTarget.dataset.id;
-        const item = state.history.find((h) => h.id === id);
-        if (item) { state.modalGeneration = item; render(); }
-      },
-      "close-modal": () => { state.modalGeneration = null; render(); },
-      "modal-download-png": () => {
-        const gen    = state.modalGeneration;
-        const imgUrl = gen?.result_url || gen?.signedUrl;
-        if (imgUrl) downloadFromUrl(imgUrl, `${slugify(gen.title)}.png`);
-      },
-      "modal-download-pdf": () => {
-        const gen    = state.modalGeneration;
-        const imgUrl = gen?.result_url || gen?.signedUrl;
-        if (imgUrl) downloadAsPdf(imgUrl, gen.title);
-      },
-      "modal-download-render-png": () => {
-        const gen = state.modalGeneration;
-        if (gen?.renderSignedUrl) downloadFromUrl(gen.renderSignedUrl, `${slugify(gen.title)}-3d.png`);
-      },
-      "modal-download-render-pdf": () => {
-        const gen = state.modalGeneration;
-        if (gen?.renderSignedUrl) downloadAsPdf(gen.renderSignedUrl, `${slugify(gen.title)}-3d`);
-      },
-
-      // ---- Plan legend ----
-      "toggle-legend": () => {
-        state.legendOpen = !state.legendOpen;
-        render();
-      },
-
-      // ---- Folders ----
-      "select-folder": () => {
-        const id = e.currentTarget.dataset.folderId;
-        state.currentFolderId = id ? id : null;
-        state.openMenuGenId = null;
-        render();
-      },
-      "rename-folder": () => {
-        const id = e.currentTarget.dataset.folderId;
-        const folder = state.folders.find((f) => f.id === id);
-        if (!folder) return;
-        state.renamingFolderId = id;
-        state.renameFolderDraft = folder.name;
-        render();
-      },
-      "delete-folder": () => {
-        const id = e.currentTarget.dataset.folderId;
-        const folder = state.folders.find((f) => f.id === id);
-        if (!folder) return;
-        if (!confirm(`Delete folder "${folder.name}"? Concepts inside it will move to "All concepts" — they will NOT be deleted.`)) return;
-        deleteFolder(id);
-      },
-
-      // ---- Per-card 3-dot menu ----
-      "toggle-card-menu": () => {
-        const id = e.currentTarget.dataset.id;
-        state.openMenuGenId = state.openMenuGenId === id ? null : id;
-        state.moveSubmenuOpen = false;
-        render();
-      },
-      "menu-download": () => {
-        const id = e.currentTarget.dataset.id;
-        const item = state.history.find((h) => h.id === id);
-        const url = item?.result_url || item?.signedUrl;
-        if (url) downloadFromUrl(url, `${slugify(item.title)}.png`);
-        state.openMenuGenId = null;
-        state.moveSubmenuOpen = false;
-        render();
-      },
-      "menu-download-render": () => {
-        const id = e.currentTarget.dataset.id;
-        const item = state.history.find((h) => h.id === id);
-        if (item?.renderSignedUrl) {
-          downloadFromUrl(item.renderSignedUrl, `${slugify(item.title)}-3d.png`);
-        }
-        state.openMenuGenId = null;
-        state.moveSubmenuOpen = false;
-        render();
-      },
-      "menu-retry-render": () => {
-        const id = e.currentTarget.dataset.id;
-        state.openMenuGenId = null;
-        state.moveSubmenuOpen = false;
-        retryRender(id);
-      },
-      "menu-rename": () => {
-        const id = e.currentTarget.dataset.id;
-        const item = state.history.find((h) => h.id === id);
-        if (!item) return;
-        state.openMenuGenId = null;
-        state.moveSubmenuOpen = false;
-        state.renamingGenId = id;
-        state.renameGenDraft = item.title || item.prompt || "";
-        render();
-      },
-      "menu-move-toggle": () => {
-        state.moveSubmenuOpen = !state.moveSubmenuOpen;
-        render();
-      },
-      "move-to-folder": () => {
-        const id = e.currentTarget.dataset.id;
-        const folderId = e.currentTarget.dataset.folderId || null;
-        state.openMenuGenId = null;
-        state.moveSubmenuOpen = false;
-        moveGenerationToFolder(id, folderId);
-      },
-      "menu-delete": () => {
-        const id = e.currentTarget.dataset.id;
-        state.openMenuGenId = null;
-        state.moveSubmenuOpen = false;
-        render();
-        if (!confirm("Delete this concept? This can't be undone.")) return;
-        deleteGeneration(id);
-      },
-    };
-    if (handlers[action]) handlers[action]();
+  function openLightbox(src) {
+    const d = document.createElement("div");
+    d.className = "lightbox";
+    d.innerHTML = `<img src="${src}" alt="">`;
+    d.addEventListener("click", () => d.remove());
+    document.addEventListener("keydown", function k(e) { if (e.key === "Escape") { d.remove(); document.removeEventListener("keydown", k); } });
+    document.body.appendChild(d);
   }
 
-  async function onAuthSubmit(e) {
-    e.preventDefault();
-    const email    = root.querySelector("#auth-email").value.trim();
-    const password = root.querySelector("#auth-password").value;
-    state.authBusy    = true;
-    state.authError   = "";
-    state.authSuccess = "";
-    render();
-
-    try {
-      if (state.authMode === "signup") {
-        const { data, error } = await sb.auth.signUp({ email, password });
-        if (error) throw error;
-        if (!data.session) {
-          state.authSuccess = "Check your email to confirm your account, then sign in.";
-          state.authMode    = "signin";
+  // ------------------------------------------------------------- auth
+  function renderAuth() {
+    const up = state.authMode === "signup";
+    root.innerHTML = `
+      <header class="topbar"><div class="brand"><span class="mark"></span> Drafted <small>Concept plans</small></div></header>
+      <div class="auth-wrap"><form class="auth-card" id="authf">
+        <div class="eyebrow">${up ? "Create account" : "Welcome back"}</div>
+        <h2>${up ? "Sign up" : "Sign in"}</h2>
+        <div class="note">Listing in, concept plan out.</div>
+        <label>Email</label><input class="fld" id="ae" type="email" autocomplete="email" required>
+        <label>Password</label><input class="fld" id="ap" type="password" autocomplete="${up ? "new-password" : "current-password"}" required minlength="6">
+        ${state.authError ? `<div class="err-box" style="margin-top:14px">${esc(state.authError)}</div>` : ""}
+        ${state.authNotice ? `<div class="note" style="margin-top:14px;color:var(--accent)">${esc(state.authNotice)}</div>` : ""}
+        <button class="btn primary" style="width:100%;justify-content:center;margin-top:18px" ${state.authBusy ? "disabled" : ""}>${state.authBusy ? "…" : up ? "Create account" : "Sign in"}</button>
+        <div class="auth-toggle">${up ? "Have an account?" : "New here?"} <button type="button" id="atg">${up ? "Sign in" : "Create one"}</button></div>
+      </form></div>`;
+    root.querySelector("#atg").onclick = () => { state.authMode = up ? "signin" : "signup"; state.authError = ""; renderAuth(); };
+    root.querySelector("#authf").onsubmit = async (e) => {
+      e.preventDefault();
+      const email = root.querySelector("#ae").value.trim(), password = root.querySelector("#ap").value;
+      state.authBusy = true; state.authError = ""; state.authNotice = ""; renderAuth();
+      try {
+        if (up) {
+          const { data, error } = await sb.auth.signUp({ email, password });
+          if (error) throw error;
+          if (!data.session) { state.authNotice = "Check your email to confirm, then sign in."; state.authMode = "signin"; }
+        } else {
+          const { error } = await sb.auth.signInWithPassword({ email, password });
+          if (error) throw error;
         }
-      } else {
-        const { error } = await sb.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-      }
-    } catch (err) {
-      state.authError = err.message || "Something went wrong.";
-    } finally {
+      } catch (err) { state.authError = err.message || "Something went wrong."; }
       state.authBusy = false;
-      render();
-    }
+      if (!state.session) renderAuth();
+    };
   }
 
-  async function handleFileSelected(file) {
-    const isImage = file.type.startsWith("image/");
-    const isPdf   = file.type === "application/pdf";
-    if (!isImage && !isPdf) {
-      state.errorMessage = "Please choose an image or a PDF file.";
-      render();
-      return;
-    }
-    state.errorMessage = "";
-    state.sourceFile   = file;
-    state.sourceKind   = isPdf ? "pdf" : "image";
-    try {
-      state.sourcePreviewUrl = isPdf ? await pdfFirstPageThumb(file) : await blobToDataURL(file);
-    } catch (err) {
-      console.error("Preview generation failed:", err);
-      state.sourcePreviewUrl = null;
-    }
-    render();
-  }
-
-  async function invokeWithAuthRetry(functionName, body) {
-    const { data: freshSession } = await sb.auth.getSession();
-    const accessToken = freshSession?.session?.access_token;
-
-    const attempt = (token) =>
-      sb.functions.invoke(functionName, {
-        body,
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-      });
-
-    let result = await attempt(accessToken);
-    const errMsg = result?.error?.message || "";
-    if (errMsg.includes("UNAUTHORIZED_NO_AUTH_HEADER") || errMsg.includes("Missing authorization")) {
-      console.warn(`Auth header missing for ${functionName} — refreshing session and retrying once`);
-      const { data: refreshed } = await sb.auth.refreshSession();
-      const retryToken = refreshed?.session?.access_token;
-      result = await attempt(retryToken);
-    }
-    return result;
-  }
-
-  async function handleGenerate() {
-    const promptText = state.promptText.trim();
-    if (!promptText) {
-      state.errorMessage = "Please describe the concept you want to generate.";
-      render();
-      return;
-    }
-
-    // Optional required-parking-stalls field. Blank -> null -> generate-concept
-    // no-ops on parking entirely. A filled-in value must be a positive whole number.
-    let requiredParkingStalls = null;
-    const rawParking = state.parkingSpaces.trim();
-    if (rawParking) {
-      const n = parseInt(rawParking, 10);
-      if (!Number.isFinite(n) || n <= 0) {
-        state.errorMessage = "Parking spaces must be a positive whole number.";
-        render();
-        return;
-      }
-      requiredParkingStalls = n;
-    }
-
-    state.generating     = true;
-    state.errorMessage   = "";
-    state.resultImageUrl = null;
-    state.renderImageUrl = null;
-    render();
-
-    try {
-      const user = state.session.user;
-      await runGenerateConceptFlow(user, promptText, requiredParkingStalls, state.want3dRender);
-    } catch (err) {
-      console.error(err);
-      stopPolling();
-      state.errorMessage = err.message || "Something went wrong.";
-      state.generating   = false;
-      render();
-    }
-  }
-
-  // Creates the `generations` row and kicks off generate-concept. A new
-  // concept always lands in "All concepts" (folder_id null) at creation
-  // time -- moving it into a folder afterward is a separate action.
-  async function runGenerateConceptFlow(user, promptText, requiredParkingStalls = null, want3dRender = false) {
-    let sourcePath   = null;
-    const sourceKind = state.sourceFile ? state.sourceKind : null;
-
-    if (state.sourceFile) {
-      let uploadBlob = state.sourceFile;
-      let uploadExt  = (state.sourceFile.name.split(".").pop() || "png").toLowerCase();
-      let uploadType = state.sourceFile.type || undefined;
-
-      if (sourceKind === "pdf") {
-        try {
-          uploadBlob = await pdfFirstPageToImageBlob(state.sourceFile);
-          uploadExt  = "png";
-          uploadType = "image/png";
-        } catch (pdfErr) {
-          throw new Error(`Could not convert PDF to image: ${pdfErr.message}`);
-        }
-      }
-
-      sourcePath = `${user.id}/${Date.now()}-${crypto.randomUUID()}.${uploadExt}`;
-      const { error: upErr } = await sb.storage
-        .from("uploads")
-        .upload(sourcePath, uploadBlob, { contentType: uploadType });
-      if (upErr) throw new Error(`Upload failed: ${upErr.message}`);
-    }
-
-    const { data: gen, error: insErr } = await sb
-      .from("generations")
-      .insert({
-        user_id:     user.id,
-        prompt:      promptText,
-        source_path: sourcePath,
-        source_kind: sourceKind,
-        status:      "pending",
-        required_parking_stalls: requiredParkingStalls,
-        // generate-render is chained off the plan's completion rather than
-        // called here -- it needs the finished plan image as its input.
-        want_3d_render: want3dRender,
-      })
-      .select()
-      .single();
-    if (insErr) throw new Error(`Could not create generation: ${insErr.message}`);
-
-    finishKickoff(gen);
-
-    invokeWithAuthRetry("generate-concept", { generation_id: gen.id }).catch((err) => {
-      console.warn("Invoke finished with error (polling continues):", err?.message);
-    });
-  }
-
-  function finishKickoff(gen) {
-    state.currentGeneration = gen;
-    state.sourceFile        = null;
-    state.sourcePreviewUrl  = null;
-    state.sourceKind        = null;
-    state.promptText        = "";
-    state.parkingSpaces     = "";
-    state.renderImageUrl    = null;
-    state.want3dRender      = false;
-
-    startPolling(gen.id);
-    render();
-  }
-
-  async function refreshHistory() {
-    const user = state.session?.user;
-    if (!user) return;
-
-    const { data, error } = await sb
-      .from("generations")
-      .select("*")
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: false })
-      .limit(24);
-
-    if (error) {
-      console.error("Failed to load history:", error);
-      state.historyLoading = false;
-      render();
-      return;
-    }
-
-    const items = data || [];
-    await Promise.all(items.map(async (item) => {
-      if (item.status === "completed" && item.output_path) {
-        item.signedUrl = await signOutputUrl(item.output_path, `history plan ${item.id}`);
-      }
-      if (item.render_path) {
-        item.renderSignedUrl = await signOutputUrl(item.render_path, `history 3D render ${item.id}`);
-      }
-    }));
-
-    state.history        = items;
-    state.historyLoading = false;
-
-    // Catch-up sweep: a render is chained off the plan finishing, so if the
-    // tab was closed in between, nothing ever kicked it off. Rows left stuck
-    // mid-flight ("rendering") or outright failed are deliberately NOT retried
-    // here -- those get the explicit "Retry 3D render" menu action instead, so
-    // a hard-failing render can't silently re-bill on every page load.
-    items
-      .filter((item) =>
-        item.status === "completed" &&
-        item.output_path &&
-        wantsRender(item) &&
-        !item.render_path &&
-        !item.render_status)
-      .forEach((item) => kickRender(item.id));
-
-    render();
-  }
-
-  // ---------------------------------------------------------------
-  // Folders — backend calls
-  // ---------------------------------------------------------------
-
-  async function loadFolders() {
-    const user = state.session?.user;
-    if (!user) return;
-
-    const { data, error } = await sb
-      .from("folders")
-      .select("*")
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: true });
-
-    if (error) {
-      console.error("Failed to load folders:", error);
-      state.foldersLoading = false;
-      render();
-      return;
-    }
-
-    state.folders = data || [];
-    state.foldersLoading = false;
-    render();
-  }
-
-  async function onNewFolderSubmit(e) {
-    e.preventDefault();
-    const name = state.newFolderDraft.trim();
-    if (!name) return;
-    await createFolder(name);
-  }
-
-  async function createFolder(name) {
-    const user = state.session?.user;
-    if (!user) return;
-
-    const { data, error } = await sb
-      .from("folders")
-      .insert({ user_id: user.id, name })
-      .select()
-      .single();
-
-    if (error) {
-      state.errorMessage = `Could not create folder: ${error.message}`;
-      render();
-      return;
-    }
-
-    state.folders = [...state.folders, data];
-    state.newFolderDraft = "";
-    render();
-  }
-
-  async function commitFolderRename() {
-    const id = state.renamingFolderId;
-    if (!id) return; // already committed (e.g. Enter then blur firing twice) -- no-op
-    const name = state.renameFolderDraft.trim();
-    state.renamingFolderId = null;
-    if (!name) { render(); return; }
-    await renameFolder(id, name);
-  }
-
-  async function renameFolder(id, name) {
-    const { data, error } = await sb
-      .from("folders")
-      .update({ name })
-      .eq("id", id)
-      .select()
-      .single();
-
-    if (error) {
-      state.errorMessage = `Could not rename folder: ${error.message}`;
-      render();
-      return;
-    }
-
-    state.folders = state.folders.map((f) => (f.id === id ? data : f));
-    render();
-  }
-
-  async function deleteFolder(id) {
-    const { error } = await sb.from("folders").delete().eq("id", id);
-
-    if (error) {
-      state.errorMessage = `Could not delete folder: ${error.message}`;
-      render();
-      return;
-    }
-
-    state.folders = state.folders.filter((f) => f.id !== id);
-    // The DB's ON DELETE SET NULL already cleared folder_id server-side;
-    // mirror that locally so the UI matches without waiting for a refetch.
-    state.history = state.history.map((h) => (h.folder_id === id ? { ...h, folder_id: null } : h));
-    if (state.currentFolderId === id) state.currentFolderId = null;
-    render();
-  }
-
-  async function moveGenerationToFolder(generationId, folderId) {
-    const { error } = await sb
-      .from("generations")
-      .update({ folder_id: folderId })
-      .eq("id", generationId);
-
-    if (error) {
-      state.errorMessage = `Could not move concept: ${error.message}`;
-      render();
-      return;
-    }
-
-    state.history = state.history.map((h) =>
-      h.id === generationId ? { ...h, folder_id: folderId } : h
-    );
-    render();
-  }
-
-  // ---------------------------------------------------------------
-  // Generations — rename
-  // ---------------------------------------------------------------
-
-  async function commitGenerationRename() {
-    const id = state.renamingGenId;
-    if (!id) return; // already committed (e.g. Enter then blur firing twice) -- no-op
-    const title = state.renameGenDraft.trim();
-    state.renamingGenId = null;
-    if (!title) { render(); return; }
-    await renameGeneration(id, title);
-  }
-
-  async function renameGeneration(id, title) {
-    const { data, error } = await sb
-      .from("generations")
-      .update({ title })
-      .eq("id", id)
-      .select()
-      .single();
-
-    if (error) {
-      state.errorMessage = `Could not rename concept: ${error.message}`;
-      render();
-      return;
-    }
-
-    state.history = state.history.map((h) => (h.id === id ? data : h));
-    if (state.currentGeneration?.id === id) state.currentGeneration = data;
-    if (state.modalGeneration?.id === id) state.modalGeneration = data;
-    render();
-  }
-
-  // ---------------------------------------------------------------
-  // Generations — 3D render retry
-  // ---------------------------------------------------------------
-
-  // Clears whatever the last attempt left behind, then re-fires
-  // generate-render. The generation is pulled up into the result panel so the
-  // retry is visible (spinner, then the render) instead of happening silently
-  // somewhere down in the library.
-  async function retryRender(id) {
-    const item = state.history.find((h) => h.id === id);
-    if (!item) return;
-
-    const { data, error } = await sb
-      .from("generations")
-      .update({ render_status: null, render_error: null })
-      .eq("id", id)
-      .select()
-      .single();
-
-    if (error) {
-      state.errorMessage = `Could not restart the 3D render: ${error.message}`;
-      render();
-      return;
-    }
-
-    state.history = state.history.map((h) =>
-      h.id === id ? { ...data, signedUrl: h.signedUrl } : h
-    );
-
-    state.modalGeneration   = null;
-    state.currentGeneration = data;
-    state.resultImageUrl    = item.signedUrl || (await signOutputUrl(data.output_path, "plan"));
-    state.renderImageUrl    = null;
-
-    // Drop the once-per-page guard so this generation can be kicked again.
-    state._renderKicked.delete(id);
-    kickRender(id);
-
-    startPolling(id);
-    render();
-  }
-
-  async function deleteGeneration(id) {
-    const item = state.history.find((h) => h.id === id)
-      || (state.modalGeneration?.id === id ? state.modalGeneration : null);
-
-    // Best-effort cleanup of storage objects -- don't block the DB delete on these.
-    if (item?.output_path) {
-      try {
-        await sb.storage.from("outputs").remove([item.output_path]);
-      } catch (e) {
-        console.warn("Failed to remove output file (non-fatal):", e);
-      }
-    }
-    if (item?.render_path) {
-      try {
-        await sb.storage.from("outputs").remove([item.render_path]);
-      } catch (e) {
-        console.warn("Failed to remove 3D render file (non-fatal):", e);
-      }
-    }
-    if (item?.source_path) {
-      try {
-        await sb.storage.from("uploads").remove([item.source_path]);
-      } catch (e) {
-        console.warn("Failed to remove source file (non-fatal):", e);
-      }
-    }
-
-    const { error } = await sb.from("generations").delete().eq("id", id);
-    if (error) {
-      state.errorMessage = `Could not delete concept: ${error.message}`;
-      render();
-      return;
-    }
-
-    state.history = state.history.filter((h) => h.id !== id);
-    if (state.currentGeneration?.id === id) {
-      state.currentGeneration = null;
-      state.resultImageUrl = null;
-    }
-    if (state.modalGeneration?.id === id) {
-      state.modalGeneration = null;
-    }
-    render();
-  }
-
-  // ---------------------------------------------------------------
-  // Boot
-  // ---------------------------------------------------------------
-
-  const PAID_REDIRECT_URL   = "https://rchase-sudo.github.io/Concept/";
-  const UNPAID_REDIRECT_URL = "https://rchase-sudo.github.io/Upgrade/";
-
-  async function checkPaidStatusAndRoute(session) {
-    if (!session) return;
-
-    const { data: profile, error } = await sb
-      .from("profiles")
-      .select("is_paid")
-      .eq("id", session.user.id)
-      .single();
-
-    if (error) {
-      console.error("Could not load profile/paid status:", error.message);
-      window.location.href = UNPAID_REDIRECT_URL;
-      return;
-    }
-
-    if (profile?.is_paid) {
-      return;
-    }
-
-    window.location.href = UNPAID_REDIRECT_URL;
-  }
-
-  async function init() {
+  // ------------------------------------------------------------- boot
+  async function boot() {
     const { data } = await sb.auth.getSession();
-    let sessionCandidate = data.session || null;
-
-    if (sessionCandidate) {
-      const { data: userData, error: userErr } = await sb.auth.getUser();
-      if (userErr || !userData?.user) {
-        console.warn("Stale session detected on load — clearing it so login shows.");
-        await sb.auth.signOut();
-        sessionCandidate = null;
-      }
-    }
-
-    state.session = sessionCandidate;
-
-    if (state.session) {
-      await checkPaidStatusAndRoute(state.session);
-    }
-
-    render();
-    if (state.session) {
-      refreshHistory();
-      loadFolders();
-    }
-
-    // Supabase silently refreshes the access token on a timer AND on
-    // tab/window focus. Only SIGNED_IN / SIGNED_OUT / USER_UPDATED actually
-    // need a rebuild + redirect check. TOKEN_REFRESHED still needs
-    // state.session updated (so subsequent Supabase calls use the fresh
-    // token) but must NOT touch the DOM or re-run redirect logic, or it
-    // silently wipes in-progress state (e.g. the prompt textarea) on every
-    // routine token refresh.
-    sb.auth.onAuthStateChange((event, session) => {
+    state.session = data.session;
+    sb.auth.onAuthStateChange((_ev, session) => {
+      const was = !!state.session;
       state.session = session;
-
-      if (event === "TOKEN_REFRESHED") {
-        return; // session object updated silently, UI stays untouched
-      }
-
-      if (!session) {
-        stopPolling();
-        state.history           = [];
-        state.historyLoading    = true;
-        state.folders           = [];
-        state.foldersLoading    = true;
-        state.currentFolderId   = null;
-        state.currentGeneration = null;
-        state.resultImageUrl    = null;
-        state.renderImageUrl    = null;
-        state._renderKicked.clear();
-      }
-      render();
-      if (session) {
-        refreshHistory();
-        loadFolders();
-        checkPaidStatusAndRoute(session);
+      if (!!session !== was) {
+        root.innerHTML = "";
+        if (session) { loadJobs(); render(); routeFromHash(); } else { clearTimeout(pollTimer); render(); }
       }
     });
+    render();
+    if (state.session) { await loadJobs(); routeFromHash(); }
+    clearInterval(listTimer);
+    listTimer = setInterval(() => { if (state.session && state.jobs.some((j) => WORKING.has(j.status))) loadJobs(); }, 15000);
   }
-
-  init();
+  function routeFromHash() {
+    const m = location.hash.match(/job=([0-9a-f-]{36})/);
+    if (m) openJob(m[1]);
+  }
+  boot();
 })();
