@@ -280,28 +280,32 @@
       ${usageCard(j)}`;
   }
 
-  // Claude API usage logged by the worker for every call on this project (tokens, web searches, USD)
+  // Cost log for this project: every billable call (Anthropic, Google geocoding + Nano Banana, Modal compute)
   function usageCard(j) {
     const U = Array.isArray(j.usage) ? j.usage : [];
     if (!U.length) return "";
-    const g = new Map();
+    const g = new Map(), prov = new Map();
     for (const u of U) {
-      const k = u.call || "Claude";
-      const r = g.get(k) || { calls: 0, inp: 0, out: 0, s: 0, usd: 0 };
-      r.calls++; r.inp += +u.input_tokens || 0; r.out += +u.output_tokens || 0; r.s += +u.searches || 0; r.usd += +u.cost_usd || 0;
-      g.set(k, r);
+      const p = u.provider || "Anthropic", key = p + "|" + (u.call || "Call");
+      const r = g.get(key) || { p, n: u.call || "Call", calls: 0, inp: 0, out: 0, s: 0, sec: 0, usd: 0 };
+      r.calls++; r.inp += +u.input_tokens || 0; r.out += +u.output_tokens || 0; r.s += +u.searches || 0; r.sec += +u.seconds || 0; r.usd += +u.cost_usd || 0;
+      g.set(key, r); prov.set(p, (prov.get(p) || 0) + (+u.cost_usd || 0));
     }
-    const tot = [...g.values()].reduce((a, r) => ({ inp: a.inp + r.inp, out: a.out + r.out, s: a.s + r.s, usd: a.usd + r.usd }), { inp: 0, out: 0, s: 0, usd: 0 });
+    const total = [...prov.values()].reduce((a, v) => a + v, 0);
     const usd = (v) => "$" + v.toFixed(v < 1 ? 3 : 2);
     const k = (v) => v >= 1000 ? (v / 1000).toFixed(1) + "k" : String(v);
+    const order = ["Anthropic", "Google", "Modal"];
+    const rows = [...g.values()].sort((a, b) => (order.indexOf(a.p) - order.indexOf(b.p)));
+    const detail = (r) => r.p === "Modal" ? `${Math.round(r.sec)} s compute` :
+      (r.inp || r.out) ? `${k(r.inp)} in / ${k(r.out)} out${r.s ? ` · ${r.s} searches` : ""}` : "";
     return `
       <details class="card usage" style="margin-top:16px">
-        <summary><b>Claude usage</b> <span class="note">· ${usd(tot.usd)} · ${k(tot.inp)} in / ${k(tot.out)} out · ${tot.s} searches</span></summary>
-        <table class="utab"><thead><tr><th>Process</th><th>Calls</th><th>Input</th><th>Output</th><th>Searches</th><th>Cost</th></tr></thead><tbody>
-        ${[...g.entries()].map(([n, r]) => `<tr><td>${esc(n)}</td><td>${r.calls}</td><td>${k(r.inp)}</td><td>${k(r.out)}</td><td>${r.s}</td><td>${usd(r.usd)}</td></tr>`).join("")}
-        <tr class="t"><td>Total</td><td>${U.length}</td><td>${k(tot.inp)}</td><td>${k(tot.out)}</td><td>${tot.s}</td><td>${usd(tot.usd)}</td></tr>
+        <summary><b>Project cost</b> <span class="note">· ${usd(total)} · ${[...prov.entries()].map(([p, v]) => `${esc(p)} ${usd(v)}`).join(" · ")}</span></summary>
+        <table class="utab"><thead><tr><th>Process</th><th>Provider</th><th>Calls</th><th>Usage</th><th>Cost</th></tr></thead><tbody>
+        ${rows.map((r) => `<tr><td>${esc(r.n)}</td><td>${esc(r.p)}</td><td>${r.calls}</td><td>${esc(detail(r))}</td><td>${usd(r.usd)}</td></tr>`).join("")}
+        <tr class="t"><td>Total</td><td></td><td>${U.length}</td><td></td><td>${usd(total)}</td></tr>
         </tbody></table>
-        <p class="note" style="margin-top:8px">Anthropic API only, at list prices. The Nano Banana render is billed separately by Google.</p>
+        <p class="note" style="margin-top:8px">List prices. Not included: Supabase and Regrid (flat plans).</p>
       </details>`;
   }
 
