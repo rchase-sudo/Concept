@@ -475,24 +475,32 @@
     if (!el || !window.L) return;
     if (el._leaflet_id) return;
     map = L.map(el, { zoomControl: true, attributionControl: true, fadeAnimation: false, zoomAnimation: false });
+    // set the view BEFORE adding any vector layer: Leaflet's SVG renderer needs map bounds when a path is added
+    const cands = j.candidates || [];
+    const selIdx = [...state.sel].filter((i) => cands[i]);
+    const fitTo = L.geoJSON({ type: "FeatureCollection", features: (selIdx.length ? selIdx.map((i) => cands[i]) : cands)
+      .map((c) => ({ type: "Feature", properties: {}, geometry: c.geometry })) });
+    try { map.fitBounds(fitTo.getBounds().pad(0.6)); }
+    catch (_) { map.setView([j.geocode?.lat || 37, j.geocode?.lon || -78], 17); }
     L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
       maxZoom: 20, maxNativeZoom: 19, attribution: "Imagery © Esri, Maxar, Earthstar Geographics" }).addTo(map);
     mapLayers = [];
-    const group = L.featureGroup().addTo(map);
-    (j.candidates || []).forEach((c, i) => {
-      const lyr = L.geoJSON(c.geometry, { style: () => styleFor(i) });
-      lyr.on("click", () => togglePick(i));
-      lyr.bindTooltip(`${num(c.acres, 2)} ac${c.address ? " · " + esc(c.address) : ""}`, { sticky: true });
-      lyr.on("mouseover", () => lyr.setStyle({ weight: 4 }));
-      lyr.on("mouseout", () => lyr.setStyle(styleFor(i)));
-      lyr.addTo(group);
-      mapLayers[i] = lyr;
+    // unselected first so the selected (red) parcels draw on top
+    const order = cands.map((_, i) => i).sort((a, b) => (state.sel.has(a) ? 1 : 0) - (state.sel.has(b) ? 1 : 0));
+    order.forEach((i) => {
+      const c = cands[i];
+      try {
+        const lyr = L.geoJSON(c.geometry, { style: () => styleFor(i) });
+        lyr.on("click", () => togglePick(i));
+        lyr.bindTooltip(`${num(c.acres, 2)} ac${c.address ? " · " + esc(c.address) : ""}`, { sticky: true });
+        lyr.on("mouseover", () => lyr.setStyle({ weight: 4 }));
+        lyr.on("mouseout", () => lyr.setStyle(styleFor(i)));
+        lyr.addTo(map);
+        mapLayers[i] = lyr;
+      } catch (e) { console.error("parcel layer", i, e); }
     });
     if (j.geocode?.lat) L.circleMarker([j.geocode.lat, j.geocode.lon], { radius: 6, color: "#fff", weight: 2, fillColor: "#2f7bff", fillOpacity: 1 })
       .bindTooltip(`Address location: ${esc(j.geocode.label || "")}`).addTo(map);
-    const sel = [...state.sel].map((i) => mapLayers[i]).filter(Boolean);
-    const target = sel.length ? L.featureGroup(sel) : group;
-    try { map.fitBounds(target.getBounds().pad(0.6)); } catch (_) { map.setView([j.geocode?.lat || 37, j.geocode?.lon || -78], 16); }
   }
   function styleFor(i) {
     // selected parcels red, the other candidates yellow, so you can see where every option sits on the aerial
@@ -502,7 +510,7 @@
   }
   function togglePick(i) {
     state.sel.has(i) ? state.sel.delete(i) : state.sel.add(i);
-    mapLayers.forEach((l, k) => l && l.setStyle(styleFor(k)));
+    mapLayers.forEach((l, k) => { if (!l) return; l.setStyle(styleFor(k)); if (state.sel.has(k)) l.bringToFront(); });
     root.querySelectorAll(".cand").forEach((el) => {
       const k = +el.dataset.i; el.classList.toggle("sel", state.sel.has(k)); el.querySelector("input").checked = state.sel.has(k);
       el.style.borderLeft = `4px solid ${state.sel.has(k) ? "#ff2b2b" : "#ffd400"}`; });
