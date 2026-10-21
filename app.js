@@ -147,8 +147,18 @@
 
   async function act(body) {
     state.busy = true; state.error = ""; renderMain();
-    try { await api(body); await refreshJob(true); loadJobs(); }
-    catch (e) { state.error = e.message; }
+    try {
+      await api(body);
+      if (state.job && body.action === "approve_zoning") { state.job.status = "zoning_approved"; state.job.progress = "Starting the layout"; }
+      if (state.job && body.action === "approve_parcel") { state.job.status = "parcel_approved"; }
+      if (state.job && body.action === "rerun") { state.job.status = { parse: "parsing", ec: "building_ec", zoning: "researching_zoning", layout: "building_layout" }[body.step] || state.job.status; }
+      state.busy = false; renderMain(); window.scrollTo({ top: 0, behavior: "smooth" });
+      await refreshJob(true); loadJobs();
+    } catch (e) {
+      // the job moved on while this screen was open (e.g. still researching): reload it and say so
+      state.error = /Job is /.test(e.message) ? `This concept changed while the page was open (${e.message}). It has been reloaded — try again.` : e.message;
+      await refreshJob(true).catch(() => {});
+    }
     state.busy = false; renderMain();
   }
 
@@ -319,7 +329,8 @@
             tax parcels into one site. ${L_acres(j)}</p>
           ${list || `<div class="note">No candidates found.</div>`}
           <div class="row" style="margin-top:10px"><span class="spacer"></span>
-            <button class="btn primary" data-a="approveparcel" ${state.busy || !state.sel.size ? "disabled" : ""}>Confirm parcel${state.sel.size > 1 ? "s" : ""}</button></div>
+            <button class="btn primary" data-a="approveparcel" ${state.busy || !state.sel.size ? "disabled" : ""}>${state.busy ? "Starting…" : `Confirm parcel${state.sel.size > 1 ? "s" : ""}`}</button></div>
+          ${state.error ? `<div class="err-box" style="margin-top:12px">${esc(state.error)}</div>` : ""}
         </div>
       </div>`;
   }
@@ -394,7 +405,8 @@
             </div>
             <div class="row" style="margin-top:18px"><span class="spacer"></span>
               ${state.showZoningEditor ? `<button class="btn ghost" data-a="canceledit">Cancel</button>` : ""}
-              <button class="btn primary" data-a="approvezoning" ${state.busy ? "disabled" : ""}>Generate layout</button></div>
+              <button class="btn primary" data-a="approvezoning" ${state.busy ? "disabled" : ""}>${state.busy ? `<span class="spin" style="width:14px;height:14px"></span> Starting layout…` : "Generate layout"}</button></div>
+            ${state.error ? `<div class="err-box" style="margin-top:12px">${esc(state.error)}</div>` : ""}
           </div>
         </div>
       </div>`;
@@ -451,7 +463,7 @@
           <div class="row" style="margin-top:18px">
             <button class="btn" data-a="editzoning">Adjust zoning / program</button>
             <span class="spacer"></span>
-            ${approved ? `<span class="tag g">Approved</span>` : `<button class="btn primary" data-a="approvelayout" ${state.busy ? "disabled" : ""}>Approve layout &amp; render</button>`}
+            ${approved ? `<span class="tag g">Approved</span>` : `<button class="btn primary" data-a="approvelayout" ${state.busy ? "disabled" : ""}>${state.busy ? "Starting render…" : "Approve layout &amp; render"}</button>`}
           </div>
         </div>
       </div>`;
