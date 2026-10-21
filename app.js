@@ -64,7 +64,8 @@
       try { const j = await res.error.context?.json?.(); if (j?.error) msg = j.error; } catch (_) {}
       throw new Error(msg);
     }
-    if (res.data?.error) throw new Error(res.data.error);
+    // a job row has its own `error` column; only an API-level error response has `error` without a job id
+    if (res.data?.error && !res.data?.id) throw new Error(res.data.error);
     return res.data;
   }
 
@@ -211,7 +212,12 @@
     if (map) { try { map.off(); map.remove(); } catch (_) {} map = null; }
     if (state.view === "new") { main.innerHTML = viewNew(); bindNew(main); return; }
     const j = state.job;
-    if (!j) { main.innerHTML = `<div class="card working"><div class="spin"></div><div><div class="w1">Loading…</div></div></div>`; return; }
+    if (!j) {
+      main.innerHTML = state.error
+        ? `<div class="err-box">${esc(state.error)}</div><div class="row" style="margin-top:12px"><button class="btn" data-a="open" data-id="${esc(state.jobId)}">Try again</button></div>`
+        : `<div class="card working"><div class="spin"></div><div><div class="w1">Loading…</div></div></div>`;
+      return;
+    }
     main.innerHTML = viewJob(j);
     bindJob(main, j);
   }
