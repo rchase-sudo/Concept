@@ -276,7 +276,33 @@
       <div class="sub">${esc([jobPlace(j), facts].filter(Boolean).join(" — "))}</div>
       ${stepper(j)}
       ${state.error ? `<div class="err-box" style="margin-bottom:14px">${esc(state.error)}</div>` : ""}
-      ${body}`;
+      ${body}
+      ${usageCard(j)}`;
+  }
+
+  // Claude API usage logged by the worker for every call on this project (tokens, web searches, USD)
+  function usageCard(j) {
+    const U = Array.isArray(j.usage) ? j.usage : [];
+    if (!U.length) return "";
+    const g = new Map();
+    for (const u of U) {
+      const k = u.call || "Claude";
+      const r = g.get(k) || { calls: 0, inp: 0, out: 0, s: 0, usd: 0 };
+      r.calls++; r.inp += +u.input_tokens || 0; r.out += +u.output_tokens || 0; r.s += +u.searches || 0; r.usd += +u.cost_usd || 0;
+      g.set(k, r);
+    }
+    const tot = [...g.values()].reduce((a, r) => ({ inp: a.inp + r.inp, out: a.out + r.out, s: a.s + r.s, usd: a.usd + r.usd }), { inp: 0, out: 0, s: 0, usd: 0 });
+    const usd = (v) => "$" + v.toFixed(v < 1 ? 3 : 2);
+    const k = (v) => v >= 1000 ? (v / 1000).toFixed(1) + "k" : String(v);
+    return `
+      <details class="card usage" style="margin-top:16px">
+        <summary><b>Claude usage</b> <span class="note">· ${usd(tot.usd)} · ${k(tot.inp)} in / ${k(tot.out)} out · ${tot.s} searches</span></summary>
+        <table class="utab"><thead><tr><th>Process</th><th>Calls</th><th>Input</th><th>Output</th><th>Searches</th><th>Cost</th></tr></thead><tbody>
+        ${[...g.entries()].map(([n, r]) => `<tr><td>${esc(n)}</td><td>${r.calls}</td><td>${k(r.inp)}</td><td>${k(r.out)}</td><td>${r.s}</td><td>${usd(r.usd)}</td></tr>`).join("")}
+        <tr class="t"><td>Total</td><td>${U.length}</td><td>${k(tot.inp)}</td><td>${k(tot.out)}</td><td>${tot.s}</td><td>${usd(tot.usd)}</td></tr>
+        </tbody></table>
+        <p class="note" style="margin-top:8px">Anthropic API only, at list prices. The Nano Banana render is billed separately by Google.</p>
+      </details>`;
   }
 
   function viewWorking(j) {

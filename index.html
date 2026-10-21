@@ -160,6 +160,15 @@
     #map { height: 380px; }
     .sb-grid { grid-template-columns: 90px repeat(3, 1fr); }
   }
+  details.usage summary { cursor: pointer; list-style: none; padding: 2px 0 }
+  details.usage summary::-webkit-details-marker { display: none }
+  details.usage summary::before { content: "▸ "; color: var(--muted, #8a8a8a) }
+  details.usage[open] summary::before { content: "▾ " }
+  .utab { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px }
+  .utab th { text-align: left; font-weight: 500; opacity: .6; padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,.08) }
+  .utab td { padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,.05) }
+  .utab th:not(:first-child), .utab td:not(:first-child) { text-align: right }
+  .utab tr.t td { font-weight: 600; border-bottom: 0 }
 </style>
 </head>
 <body>
@@ -170,6 +179,6 @@ const SUPABASE_URL = "https://mmaqwemqbxwngqxtnsug.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1tYXF3ZW1xYnh3bmdxeHRuc3VnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NDY1MjgsImV4cCI6MjA5ODMyMjUyOH0.UrC1-5gGNODzu1PHU1QEqZAfzYhDbpQDlK3ruaIUDj0";
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 </script>
-<script src="app.js?v=1792613281"></script>
+<script src="app.js?v=1792615390"></script>
 </body>
 </html>
