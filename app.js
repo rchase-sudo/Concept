@@ -112,7 +112,7 @@
   // ------------------------------------------------------------- actions
   async function startJob() {
     const text = state.listingText.trim();
-    if (text.length < 40) { state.error = "Paste the full listing page (Ctrl+A, Ctrl+C on the listing, then paste here)."; renderMain(); return; }
+    if (text.length < 20) { state.error = "Add the property: an address or parcel ID, and the town and state."; renderMain(); return; }
     state.busy = true; state.error = ""; renderMain();
     try {
       const { job_id } = await api({ action: "start", listing_text: text, source: "tool" });
@@ -239,15 +239,15 @@
   function viewNew() {
     return `
       <div class="eyebrow">New concept</div>
-      <h1 class="title">Paste the listing</h1>
-      <p class="sub">Open the listing (LoopNet, Crexi, MLS…), press <b>Ctrl+A</b> then <b>Ctrl+C</b>, and paste it below. The pipeline finds the parcel,
-        draws existing conditions on the aerial, researches zoning and setbacks, proposes a program and lays out the site. You confirm the parcel,
-        the zoning and the layout along the way.</p>
+      <h1 class="title">Describe the site</h1>
+      <p class="sub">Give Drafted the property and, if you like, what you want on it: an address or parcel ID, the acreage, and a short prompt.
+        A full listing page pasted in works too. Drafted finds the parcel, maps existing conditions, researches zoning and setbacks,
+        and lays out the site. You confirm the parcel, the zoning and the layout along the way.</p>
       <div class="card" style="margin-top:22px">
-        <textarea class="listing" id="listing" placeholder="Paste the whole listing page here…">${esc(state.listingText)}</textarea>
+        <textarea class="listing" id="listing" placeholder="2839 US 70 Hwy, Durham, NC 27703 · about 4 acres&#10;Retail strip with a sit-down restaurant, parking in front.">${esc(state.listingText)}</textarea>
         ${state.error ? `<div class="err-box" style="margin-top:12px">${esc(state.error)}</div>` : ""}
         <div class="row" style="margin-top:14px">
-          <span class="note">Tip: include the parcel ID / APN if the listing shows it — it pins the parcel instantly.</span>
+          <span class="note">Tip: a parcel ID (APN / PIN) pins the parcel instantly.</span>
           <span class="spacer"></span>
           <button class="btn primary" data-a="start" ${state.busy ? "disabled" : ""}>${state.busy ? "Starting…" : "Generate concept"}</button>
         </div>
