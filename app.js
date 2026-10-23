@@ -145,7 +145,7 @@
     const program = { ...(state.job.program || {}), use: e.use, buildings, parking: { ...(state.job.program?.parking || {}), required: n(e.required), calc: e.calc } };
     state.showZoningEditor = false;
     await act({ action: "approve_zoning", job_id: state.jobId, setbacks, parking_setbacks: pave, program, drive_road: e.drive || null,
-      zoning: { building_actions: Object.fromEntries((j0.summary?.existing_buildings || []).map((b) => [b.id, e.bact[b.id] === "demo" ? "demo" : "keep"])) } });
+      zoning: { max_slope_pct: +e.slope || 0, building_actions: Object.fromEntries((j0.summary?.existing_buildings || []).map((b) => [b.id, e.bact[b.id] === "demo" ? "demo" : "keep"])) } });
   }
 
   async function act(body) {
@@ -189,6 +189,7 @@
       required: prog.parking?.required ?? "",
       calc: prog.parking?.calc || prog.parking?.ratio_text || "",
       drive: z.drive_road || "",   // "" = automatic (longest frontage)
+      slope: z.max_slope_pct === undefined ? "15" : (z.max_slope_pct ? String(z.max_slope_pct) : "0"),   // max slope (%) for building / parking; "0" = ignore slope
       bact: { ...(z.building_actions || {}) },   // existing building id -> "keep" | "demo" (default keep)
     };
     state.editKey = key;
@@ -406,6 +407,7 @@
             </div>
           </div>
           ${driveCard(j)}
+          ${topoCard(j)}
           ${bldgCard(j)}
         </div>
         <div>
@@ -467,6 +469,33 @@
           ${R.map((r) => opt(r.key, r.name, `${r.class} · ${num(r.frontage_ft)} ft frontage`)).join("")}
         </div>
         <p class="note" style="margin:8px 0 0">${R.length > 1 ? "The layout faces this road and the driveway connects to its centerline. Click a road on the map or pick it here." : "Only one road touches the parcel, so the driveway connects to it."}</p>
+      </div>`;
+  }
+
+  // Topography: USGS 3DEP slope on the parcel; ground steeper than the chosen limit is kept out of buildings and parking
+  function topoCard(j) {
+    const t = j.summary?.topo, e = state.edit;
+    if (!t || t.available === false) {
+      return `<div class="card"><h3>Topography</h3>
+        <p class="note" style="margin:0">${t ? "Elevation data was unavailable for this site, so slope was not considered." : "Not checked yet for this concept."}</p>
+        <button class="btn sm" data-a="findt" ${state.busy ? "disabled" : ""} style="margin-top:8px">${t ? "Check again" : "Read elevation data"}</button></div>`;
+    }
+    const col = ["#4caf50", "#c8d94a", "#ffb02e", "#ff5a3c", "#b0102a"];
+    const bars = (t.classes || []).map((c, i) => `<div class="tb"><span style="width:${Math.max(c.pct, 0.8)}%;background:${col[i]}"></span><em>${esc(c.label)} · ${num(c.pct, 0)}%</em></div>`).join("");
+    const opt = (v, l) => `<option value="${v}" ${e.slope === v ? "selected" : ""}>${l}</option>`;
+    return `
+      <div class="card">
+        <h3>Topography</h3>
+        <div class="kv">
+          <div><span>Relief</span><b>${num(t.relief_ft, 0)} ft</b></div>
+          <div><span>Average slope</span><b>${num(t.avg_slope_pct, 1)}%</b></div>
+          <div><span>Steepest 10%</span><b>over ${num(t.p90_slope_pct, 0)}%</b></div>
+          <div><span>Over ${esc(String(t.threshold_pct || e.slope))}%</span><b>${num(t.steep_pct, 0)}% of parcel</b></div>
+        </div>
+        <div class="tbars">${bars}</div>
+        <div class="row" style="margin-top:12px;align-items:center"><div class="note" style="flex:1">Keep buildings and parking off ground steeper than</div>
+          <select class="fld" data-bind="slope" style="width:130px">${opt("10", "10%")}${opt("15", "15% (default)")}${opt("20", "20%")}${opt("25", "25%")}${opt("0", "No limit")}</select></div>
+        <p class="note" style="margin:8px 0 0">Slope shading and contours are on the existing-conditions sheet. Data: USGS 3DEP (about 10 m, planning grade, not a survey).</p>
       </div>`;
   }
 
@@ -616,6 +645,7 @@
           </div>
           ${(m.buildings || []).length ? `<div class="notes" style="margin-top:14px">${m.buildings.map((b) => `${esc((b.use || b.name || "").toString())} — ${num(b.w_ft)}' × ${num(b.d_ft)}' · ${num(b.footprint_sf)} SF${b.drive_thru ? " · drive-thru" : ""}`).join("\n")}</div>` : ""}
           ${(m.existing || []).length ? `<div class="notes" style="margin-top:10px">${m.existing.map((x) => `Existing ${esc(x.id)} (${esc(x.label || "building")}, ${num(x.sf)} SF) — ${x.action === "demo" ? "demolished" : "remains"}`).join("\n")}</div>` : ""}
+          ${m.earthwork ? `<div class="notes" style="margin-top:10px">Grading (rough): ${num(m.earthwork.cut_cy)} CY cut / ${num(m.earthwork.fill_cy)} CY fill · pad about ${num(m.earthwork.pad_ft, 0)} ft · ${num(m.earthwork.avg_slope_pct, 1)}% average slope</div>` : ""}
           ${(m.warnings || []).length ? `<div class="warnings">${m.warnings.map((w) => `<div>⚠ ${esc(w)}</div>`).join("")}</div>` : ""}
         </div>
         <div class="card">
@@ -724,6 +754,7 @@
       case "approvezoning": approveZoning(); break;
       case "approvelayout": act({ action: "approve_layout", job_id: state.jobId }); break;
       case "rerender": act({ action: "render", job_id: state.jobId }); break;
+      case "findt": act({ action: "rerun", job_id: state.jobId, step: "topo" }); break;
       case "findb": act({ action: "rerun", job_id: state.jobId, step: "buildings" }); break;
       case "package": act({ action: "package", job_id: state.jobId }); break;
       case "retry": act({ action: "rerun", job_id: state.jobId, step: state.job.step || "parse" }); break;

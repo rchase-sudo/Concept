@@ -175,6 +175,10 @@
   .droad.on { border-color: #2bff88; background: rgba(43,255,136,.06) }
   .droad input { accent-color: #2bff88 }
   .droad span { display: flex; flex-direction: column; gap: 2px }
+  .tbars { display: grid; gap: 4px; margin-top: 12px }
+  .tb { position: relative; height: 20px; background: rgba(255,255,255,.05); border-radius: 5px; overflow: hidden }
+  .tb span { position: absolute; left: 0; top: 0; bottom: 0; opacity: .55 }
+  .tb em { position: relative; font-style: normal; font-size: 12px; padding: 0 8px; line-height: 20px }
   .bl { display: grid; gap: 6px }
   .brow { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid rgba(255,255,255,.08); border-radius: 8px }
   .bid { font-weight: 700; min-width: 28px }
@@ -193,6 +197,6 @@ const SUPABASE_URL = "https://mmaqwemqbxwngqxtnsug.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1tYXF3ZW1xYnh3bmdxeHRuc3VnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NDY1MjgsImV4cCI6MjA5ODMyMjUyOH0.UrC1-5gGNODzu1PHU1QEqZAfzYhDbpQDlK3ruaIUDj0";
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 </script>
-<script src="app.js?v=1792775881"></script>
+<script src="app.js?v=1792778298"></script>
 </body>
 </html>
