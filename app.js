@@ -147,7 +147,7 @@
     await act({ action: "approve_zoning", job_id: state.jobId, setbacks, parking_setbacks: pave, program, drive_road: e.drive || null,
       zoning: { max_slope_pct: +e.slope || 0, building_actions: Object.fromEntries((j0.summary?.existing_buildings || []).map((b) => [b.id, e.bact[b.id] === "demo" ? "demo" : "keep"])),
         pavement_actions: Object.fromEntries((j0.summary?.existing_pavement || []).map((p) => [p.id, e.pact[p.id] === "remove" ? "remove" : "reuse"])),
-        shared_stalls: Math.max(0, parseInt(e.sstalls, 10) || 0) } });
+        shared_stalls: Math.max(0, parseInt(e.sstalls, 10) || 0), tie_existing: e.tie !== false } });
   }
 
   async function act(body) {
@@ -194,6 +194,7 @@
       slope: z.max_slope_pct === undefined ? "15" : (z.max_slope_pct ? String(z.max_slope_pct) : "0"),   // max slope (%) for building / parking; "0" = ignore slope
       bact: { ...(z.building_actions || {}) },   // existing building id -> "keep" | "demo" (default keep)
       pact: { ...(z.pavement_actions || {}) },   // existing pavement id -> "reuse" | "remove" (default reuse)
+      tie: z.tie_existing !== false,             // tie the new development into kept pavement (default) instead of the public road
       sstalls: z.shared_stalls || 0,             // existing stalls the new program may count toward its parking
     };
     state.editKey = key;
@@ -539,6 +540,7 @@
             <span class="segs">${seg(p, "reuse", "Reuse")}${seg(p, "remove", "Remove")}</span></div>`).join("")}</div>
         <label class="note" style="display:block;margin-top:8px">Existing stalls the new buildings can count toward their parking
           <input type="number" min="0" step="1" data-k="sstalls" value="${esc(String(e.sstalls || 0))}" style="width:80px;margin-left:6px"></label>
+        <label class="note" style="display:block;margin-top:8px"><input type="checkbox" data-k="tie" ${e.tie !== false ? "checked" : ""}> Tie the new development into the existing pavement (instead of a new drive from the public road)</label>
         <p class="note" style="margin:8px 0 0">Reused pavement stays on the plan; new buildings and parking are placed around it and the access road follows existing drives where it can. Removed pavement is marked for demolition and the site is paved from scratch there. Detected from OpenStreetMap and the aerial, so check against the photo.</p>
       </div>`;
   }
@@ -710,6 +712,7 @@
     if (j.status === "awaiting_parcel") drawMap(j);
     drawBldgMap(j);
     main.querySelectorAll("[data-a=pact]").forEach((b) => b.addEventListener("click", () => setPave(b.dataset.id, b.dataset.v)));
+    main.querySelectorAll("[data-k=tie]").forEach((i) => i.addEventListener("change", () => { state.edit.tie = i.checked; }));
     main.querySelectorAll("[data-k=sstalls]").forEach((i) => i.addEventListener("input", () => { state.edit.sstalls = i.value; }));
     main.querySelectorAll("[data-a=bact]").forEach((b) => b.addEventListener("click", () => setBldg(b.dataset.id, b.dataset.v)));
     main.querySelectorAll("[data-a=ball]").forEach((b) => b.addEventListener("click", () => (j.summary?.existing_buildings || []).forEach((x) => setBldg(x.id, b.dataset.v))));
