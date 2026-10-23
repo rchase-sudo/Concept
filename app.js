@@ -91,7 +91,7 @@
       const j = await api({ action: "status", job_id: state.jobId });
       const prev = state.job;
       const changed = force || !prev || prev.status !== j.status || prev.progress !== j.progress || prev.updated_at !== j.updated_at ||
-        prev.render_status !== j.render_status || prev.package_status !== j.package_status;
+        prev.render_status !== j.render_status || prev.package_status !== j.package_status || prev.design_status !== j.design_status;
       state.job = j;
       if (j.status === "awaiting_parcel" && state.sel.size === 0 && j.candidates?.length) state.sel = new Set([0]);
       if (changed) { renderMain(); if (prev?.status !== j.status) loadJobs(); }
@@ -105,7 +105,7 @@
     clearTimeout(pollTimer);
     const j = state.job;
     const renderPending = j && j.status === "layout_approved" && ["queued", "modeling", "rendering", "nanobanana", "compositing"].includes(j.render_status);
-    const pkgPending = j && ["queued", "researching", "writing", "typesetting"].includes(j.package_status);
+    const pkgPending = j && (["queued", "researching", "writing", "typesetting"].includes(j.package_status) || ["queued", "designing"].includes(j.design_status));
     if (state.view === "job" && j && (WORKING.has(j.status) || renderPending || pkgPending)) pollTimer = setTimeout(() => refreshJob(), renderPending || pkgPending ? 6000 : 4000);
   }
 
@@ -157,6 +157,7 @@
       if (state.job && body.action === "approve_zoning") { state.job.status = "zoning_approved"; state.job.progress = "Starting the layout"; }
       if (state.job && body.action === "approve_parcel") { state.job.status = "parcel_approved"; }
       if (state.job && body.action === "package") { state.job.package_status = "queued"; }
+      if (state.job && body.action === "design") { state.job.design_status = "queued"; }
       if (state.job && body.action === "rerun") { state.job.status = { parse: "parsing", ec: "building_ec", zoning: "researching_zoning", layout: "building_layout" }[body.step] || state.job.status; }
       state.busy = false; renderMain(); window.scrollTo({ top: 0, behavior: "smooth" });
       await refreshJob(true); loadJobs();
@@ -662,7 +663,25 @@
           <div class="w2">Web research, proforma and typesetting · about 4–8 minutes</div></div></div>` : ""}
         ${j.package_status === "failed" ? `<div class="err-box" style="margin-top:10px">Package failed: ${esc(j.package_error || "unknown error")}</div>` : ""}
       </div>`;
-    return `${pkgCard}${renderCard}
+    const dsg = f.design?.["plan_set.pdf"];
+    const DSP = ["queued", "designing"].includes(j.design_status);
+    const ds = j.design || {};
+    const designCard = !approved ? "" : `
+      <div class="card" style="padding:14px 16px;margin-bottom:16px">
+        <div class="row"><div><h3 style="margin:0">Full design: preliminary plan set</h3>
+          <div class="note">Title sheet, existing conditions, site, erosion control and demolition, grading, drainage, profiles, utilities, fire, landscape and lighting (no detail sheets). Not sealed.</div></div>
+          <span class="spacer"></span>
+          ${DSP ? "" : dsg ? `<a class="btn primary sm" href="${dsg}" download="${esc(fileName(j, "Plan Set", "pdf"))}" target="_blank" rel="noopener">Download plan set (PDF)</a>
+            <button class="btn sm" data-a="design" ${state.busy ? "disabled" : ""}>Rebuild</button>` :
+            `<button class="btn primary" data-a="design" ${state.busy ? "disabled" : ""}>${state.busy ? "Starting…" : "Build full plan set"}</button>`}</div>
+        ${DSP ? `<div class="working" style="padding:12px 0 0"><div class="spin"></div><div><div class="w1">${esc(j.progress || "Designing grading, drainage and utilities")}</div>
+          <div class="w2">Grading, storm, utilities and sheets · about 2–4 minutes</div></div></div>` : ""}
+        ${dsg && !DSP ? `<div class="kv" style="margin-top:10px"><div><span>Pond</span><b>${num(ds.pond_cf)} CF</b></div><div><span>Cut / fill</span><b>${num(ds.cut_cy)} / ${num(ds.fill_cy)} CY</b></div><div><span>Disturbed</span><b>${num(ds.disturbed_ac, 2)} ac</b></div></div>
+          ${(ds.warnings || []).length ? `<div class="note" style="margin-top:8px">${(ds.warnings || []).map(esc).join("<br>")}</div>` : ""}
+          <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:6px">${["T1","C1","C2","C3","C4","C5","C6","C7","C8","C9","C10"].filter(n => f.design?.[`sheet_${n}.png`]).map(n => `<a class="btn sm" href="${f.design[`sheet_${n}.png`]}" target="_blank" rel="noopener">${n}</a>`).join("")}</div>` : ""}
+        ${j.design_status === "failed" ? `<div class="err-box" style="margin-top:10px">Plan set failed: ${esc(j.design_error || "unknown error")}</div>` : ""}
+      </div>`;
+    return `${pkgCard}${designCard}${renderCard}
       <div class="card" style="padding:12px">${png ? `<img class="plan" src="${png}" data-a="zoom" data-src="${png}" alt="Concept plan">` : `<div class="note">Plan image missing.</div>`}</div>
       <div class="grid2" style="margin-top:16px">
         <div class="card">
@@ -792,6 +811,7 @@
       case "findt": act({ action: "rerun", job_id: state.jobId, step: "topo" }); break;
       case "findb": act({ action: "rerun", job_id: state.jobId, step: "buildings" }); break;
       case "package": act({ action: "package", job_id: state.jobId }); break;
+      case "design": act({ action: "design", job_id: state.jobId }); break;
       case "retry": act({ action: "rerun", job_id: state.jobId, step: state.job.step || "parse" }); break;
       case "repick": state.error = ""; state.job.status = "awaiting_parcel"; renderMain(); break;
       case "editzoning": state.showZoningEditor = true; state.edit = null; if (state.job.status === "error") state.job.status = "awaiting_zoning"; renderMain(); break;
