@@ -474,8 +474,10 @@
   function bldgCard(j) {
     const B = j.summary?.existing_buildings || [], e = state.edit;
     if (!B.length) {
-      return j.summary?.buildings_checked === false ? `<div class="card"><h3>Existing buildings</h3>
-        <p class="note" style="margin:0">Building data was unavailable for this site, so it was planned as vacant land. Re-run existing conditions to try again.</p></div>` : "";
+      const ck = j.summary?.buildings_checked;
+      const btn = `<button class="btn sm" data-a="findb" ${state.busy ? "disabled" : ""} style="margin-top:8px">${ck === undefined ? "Find existing buildings" : "Check again"}</button>`;
+      return `<div class="card"><h3>Existing buildings</h3>
+        <p class="note" style="margin:0">${ck === undefined ? "Not checked yet for this concept." : ck === false ? "Building data was unavailable for this site, so it was planned as vacant land." : "No existing buildings were found on this parcel."}</p>${ck === true ? "" : btn}</div>`;
     }
     const seg = (b, v, lab) => `<button class="seg ${(e.bact[b.id] || "keep") === v ? "on " + v : ""}" data-a="bact" data-id="${esc(b.id)}" data-v="${v}">${lab}</button>`;
     return `
@@ -722,6 +724,7 @@
       case "approvezoning": approveZoning(); break;
       case "approvelayout": act({ action: "approve_layout", job_id: state.jobId }); break;
       case "rerender": act({ action: "render", job_id: state.jobId }); break;
+      case "findb": act({ action: "rerun", job_id: state.jobId, step: "buildings" }); break;
       case "package": act({ action: "package", job_id: state.jobId }); break;
       case "retry": act({ action: "rerun", job_id: state.jobId, step: state.job.step || "parse" }); break;
       case "repick": state.error = ""; state.job.status = "awaiting_parcel"; renderMain(); break;
