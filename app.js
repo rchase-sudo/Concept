@@ -145,7 +145,9 @@
     const program = { ...(state.job.program || {}), use: e.use, buildings, parking: { ...(state.job.program?.parking || {}), required: n(e.required), calc: e.calc } };
     state.showZoningEditor = false;
     await act({ action: "approve_zoning", job_id: state.jobId, setbacks, parking_setbacks: pave, program, drive_road: e.drive || null,
-      zoning: { max_slope_pct: +e.slope || 0, building_actions: Object.fromEntries((j0.summary?.existing_buildings || []).map((b) => [b.id, e.bact[b.id] === "demo" ? "demo" : "keep"])) } });
+      zoning: { max_slope_pct: +e.slope || 0, building_actions: Object.fromEntries((j0.summary?.existing_buildings || []).map((b) => [b.id, e.bact[b.id] === "demo" ? "demo" : "keep"])),
+        pavement_actions: Object.fromEntries((j0.summary?.existing_pavement || []).map((p) => [p.id, e.pact[p.id] === "remove" ? "remove" : "reuse"])),
+        shared_stalls: Math.max(0, parseInt(e.sstalls, 10) || 0) } });
   }
 
   async function act(body) {
@@ -191,6 +193,8 @@
       drive: z.drive_road || "",   // "" = automatic (longest frontage)
       slope: z.max_slope_pct === undefined ? "15" : (z.max_slope_pct ? String(z.max_slope_pct) : "0"),   // max slope (%) for building / parking; "0" = ignore slope
       bact: { ...(z.building_actions || {}) },   // existing building id -> "keep" | "demo" (default keep)
+      pact: { ...(z.pavement_actions || {}) },   // existing pavement id -> "reuse" | "remove" (default reuse)
+      sstalls: z.shared_stalls || 0,             // existing stalls the new program may count toward its parking
     };
     state.editKey = key;
   }
@@ -409,6 +413,7 @@
           ${driveCard(j)}
           ${topoCard(j)}
           ${bldgCard(j)}
+          ${paveCard(j)}
         </div>
         <div>
           <div class="card">
@@ -521,6 +526,28 @@
       </div>`;
   }
 
+  // Existing pavement (parking lots, drives): reuse it (new work builds off it) or remove it (paved from scratch)
+  function paveCard(j) {
+    const P = j.summary?.existing_pavement || [], e = state.edit;
+    if (!P.length) return "";
+    const seg = (p, v, lab) => `<button class="seg ${(e.pact[p.id] || "reuse") === v ? "on " + (v === "reuse" ? "keep" : "demo") : ""}" data-a="pact" data-id="${esc(p.id)}" data-v="${v}">${lab}</button>`;
+    return `
+      <div class="card">
+        <h3>Existing pavement</h3>
+        <div class="bl">${P.map((p) => `<div class="brow"><span class="bid">${esc(p.id)}</span>
+            <span class="bnm"><b>${p.kind === "parking" ? "Parking area" : "Drive"}</b><span class="note">${num(p.area_sf)} SF${p.est_stalls ? " · about " + p.est_stalls + " stalls" : ""} · ${esc(p.src || "aerial")}</span></span>
+            <span class="segs">${seg(p, "reuse", "Reuse")}${seg(p, "remove", "Remove")}</span></div>`).join("")}</div>
+        <label class="note" style="display:block;margin-top:8px">Existing stalls the new buildings can count toward their parking
+          <input type="number" min="0" step="1" data-k="sstalls" value="${esc(String(e.sstalls || 0))}" style="width:80px;margin-left:6px"></label>
+        <p class="note" style="margin:8px 0 0">Reused pavement stays on the plan; new buildings and parking are placed around it and the access road follows existing drives where it can. Removed pavement is marked for demolition and the site is paved from scratch there. Detected from OpenStreetMap and the aerial, so check against the photo.</p>
+      </div>`;
+  }
+
+  function setPave(id, v) {
+    state.edit.pact[id] = v;
+    root.querySelectorAll(`.seg[data-a="pact"][data-id="${id}"]`).forEach((b) => { b.classList.remove("on", "keep", "demo"); if (b.dataset.v === v) b.classList.add("on", v === "reuse" ? "keep" : "demo"); });
+  }
+
   function drawBldgMap(j) {
     const el = document.getElementById("bmap");
     const B = j.summary?.existing_buildings || [];
@@ -541,6 +568,9 @@
       l.bindTooltip(`${b.id} · ${b.label} · ${num(b.area_sf)} SF`, { sticky: true });
       l.on("click", () => setBldg(b.id, state.edit.bact[b.id] === "demo" ? "keep" : "demo"));
       lyr[b.id] = l;
+    });
+    (j.summary?.existing_pavement || []).forEach((p) => {
+      L.polygon(p.ring, { color: "#9aa4b2", weight: 1.5, dashArray: "5 4", fillColor: "#c8ced6", fillOpacity: 0.35 }).addTo(bm).bindTooltip(`${p.id} · ${p.kind === "parking" ? "parking" : "drive"} · ${num(p.area_sf)} SF`, { sticky: true });
     });
     window._bldgLayers = lyr;
     setTimeout(() => { bm.invalidateSize(); bm.fitBounds(bounds.pad(0.12)); }, 50);
@@ -644,7 +674,7 @@
             <div><span>Remaining land</span><b>${num(m.remaining_developable_acres, 2)} ac</b></div>
           </div>
           ${(m.buildings || []).length ? `<div class="notes" style="margin-top:14px">${m.buildings.map((b) => `${esc((b.use || b.name || "").toString())} — ${num(b.w_ft)}' × ${num(b.d_ft)}' · ${num(b.footprint_sf)} SF${b.drive_thru ? " · drive-thru" : ""}`).join("\n")}</div>` : ""}
-          ${(m.existing || []).length ? `<div class="notes" style="margin-top:10px">${m.existing.map((x) => `Existing ${esc(x.id)} (${esc(x.label || "building")}, ${num(x.sf)} SF) — ${x.action === "demo" ? "demolished" : "remains"}`).join("\n")}</div>` : ""}
+          ${(m.existing || []).length ? `<div class="notes" style="margin-top:10px">${m.existing.map((x) => x.kind === "pavement" ? `Existing pavement ${esc(x.id)} (${esc(x.label || "pavement")}, ${num(x.sf)} SF) — ${x.action === "demo" ? "removed" : "reused"}` : `Existing ${esc(x.id)} (${esc(x.label || "building")}, ${num(x.sf)} SF) — ${x.action === "demo" ? "demolished" : "remains"}`).join("\n")}</div>` : ""}
           ${m.earthwork ? `<div class="notes" style="margin-top:10px">Grading (rough): ${num(m.earthwork.cut_cy)} CY cut / ${num(m.earthwork.fill_cy)} CY fill · pad about ${num(m.earthwork.pad_ft, 0)} ft · ${num(m.earthwork.avg_slope_pct, 1)}% average slope</div>` : ""}
           ${(m.warnings || []).length ? `<div class="warnings">${m.warnings.map((w) => `<div>⚠ ${esc(w)}</div>`).join("")}</div>` : ""}
         </div>
@@ -679,6 +709,8 @@
     });
     if (j.status === "awaiting_parcel") drawMap(j);
     drawBldgMap(j);
+    main.querySelectorAll("[data-a=pact]").forEach((b) => b.addEventListener("click", () => setPave(b.dataset.id, b.dataset.v)));
+    main.querySelectorAll("[data-k=sstalls]").forEach((i) => i.addEventListener("input", () => { state.edit.sstalls = i.value; }));
     main.querySelectorAll("[data-a=bact]").forEach((b) => b.addEventListener("click", () => setBldg(b.dataset.id, b.dataset.v)));
     main.querySelectorAll("[data-a=ball]").forEach((b) => b.addEventListener("click", () => (j.summary?.existing_buildings || []).forEach((x) => setBldg(x.id, b.dataset.v))));
     if (main.querySelector(".droads")) {
