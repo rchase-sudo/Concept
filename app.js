@@ -679,7 +679,7 @@
           <div class="w2">Grading, storm, utilities and sheets · about 2–4 minutes</div></div></div>` : ""}
         ${dsg && !DSP ? `<div class="kv" style="margin-top:10px"><div><span>Pond</span><b>${num(ds.pond_cf)} CF</b></div><div><span>Cut / fill</span><b>${num(ds.cut_cy)} / ${num(ds.fill_cy)} CY</b></div><div><span>Disturbed</span><b>${num(ds.disturbed_ac, 2)} ac</b></div></div>
           ${(ds.warnings || []).length ? `<div class="note" style="margin-top:8px">${(ds.warnings || []).map(esc).join("<br>")}</div>` : ""}
-          <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:6px">${["T1","C1","C2","C3","C4","C5","C6","C7","C8","C9","C10"].filter(n => f.design?.[`sheet_${n}.png`]).map(n => `<a class="btn sm" href="${f.design[`sheet_${n}.png`]}" target="_blank" rel="noopener">${n}</a>`).join("")}</div>` : ""}
+          <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:6px">${["T1","C1","C2","C3","C4","C5","C6","C7","C8"].filter(n => f.design?.[`sheet_${n}.png`]).map(n => `<a class="btn sm" href="${f.design[`sheet_${n}.png`]}" target="_blank" rel="noopener">${n}</a>`).join("")}</div>` : ""}
         ${j.design_status === "failed" ? `<div class="err-box" style="margin-top:10px">Plan set failed: ${esc(j.design_error || "unknown error")}</div>` : ""}
       </div>`;
     return `${pkgCard}${designCard}${renderCard}
