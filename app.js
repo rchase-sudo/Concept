@@ -141,9 +141,11 @@
       name: b.name || `Building ${String.fromCharCode(65 + i)}`, use: b.use || b.label, label: b.label || b.use,
       footprint_sf: n(b.footprint_sf), depth_ft: n(b.depth_ft) || 60, stories: n(b.stories) || 1, drive_thru: !!b.drive_thru }));
     if (!buildings.length) { state.error = "Add at least one building."; renderMain(); return; }
+    const j0 = state.job;
     const program = { ...(state.job.program || {}), use: e.use, buildings, parking: { ...(state.job.program?.parking || {}), required: n(e.required), calc: e.calc } };
     state.showZoningEditor = false;
-    await act({ action: "approve_zoning", job_id: state.jobId, setbacks, parking_setbacks: pave, program, drive_road: e.drive || null });
+    await act({ action: "approve_zoning", job_id: state.jobId, setbacks, parking_setbacks: pave, program, drive_road: e.drive || null,
+      zoning: { building_actions: Object.fromEntries((j0.summary?.existing_buildings || []).map((b) => [b.id, e.bact[b.id] === "demo" ? "demo" : "keep"])) } });
   }
 
   async function act(body) {
@@ -187,6 +189,7 @@
       required: prog.parking?.required ?? "",
       calc: prog.parking?.calc || prog.parking?.ratio_text || "",
       drive: z.drive_road || "",   // "" = automatic (longest frontage)
+      bact: { ...(z.building_actions || {}) },   // existing building id -> "keep" | "demo" (default keep)
     };
     state.editKey = key;
   }
@@ -403,6 +406,7 @@
             </div>
           </div>
           ${driveCard(j)}
+          ${bldgCard(j)}
         </div>
         <div>
           <div class="card">
@@ -464,6 +468,58 @@
         </div>
         <p class="note" style="margin:8px 0 0">${R.length > 1 ? "The layout faces this road and the driveway connects to its centerline. Click a road on the map or pick it here." : "Only one road touches the parcel, so the driveway connects to it."}</p>
       </div>`;
+  }
+
+  // Existing buildings on the parcel: keep (the layout builds around it) or demolish (the layout ignores it)
+  function bldgCard(j) {
+    const B = j.summary?.existing_buildings || [], e = state.edit;
+    if (!B.length) {
+      return j.summary?.buildings_checked === false ? `<div class="card"><h3>Existing buildings</h3>
+        <p class="note" style="margin:0">Building data was unavailable for this site, so it was planned as vacant land. Re-run existing conditions to try again.</p></div>` : "";
+    }
+    const seg = (b, v, lab) => `<button class="seg ${(e.bact[b.id] || "keep") === v ? "on " + v : ""}" data-a="bact" data-id="${esc(b.id)}" data-v="${v}">${lab}</button>`;
+    return `
+      <div class="card">
+        <h3>Existing buildings</h3>
+        <div id="bmap" class="rmap"></div>
+        <div class="bl">${B.map((b) => `<div class="brow"><span class="bid">${esc(b.id)}</span>
+            <span class="bnm"><b>${esc(b.label)}</b><span class="note">${num(b.area_sf)} SF · ${esc(b.src)}${b.pct_on_site < 0.95 ? " · partly off the parcel" : ""}</span></span>
+            <span class="segs">${seg(b, "keep", "Keep")}${seg(b, "demo", "Demolish")}</span></div>`).join("")}</div>
+        <div class="row" style="margin-top:8px"><button class="btn sm" data-a="ball" data-v="demo">Demolish all</button><button class="btn sm" data-a="ball" data-v="keep">Keep all</button></div>
+        <p class="note" style="margin:8px 0 0">Kept buildings stay on the plan and the layout builds around them with clearance. Demolished ones are marked on the plan and cleared from the render. Footprints come from OpenStreetMap and USA Structures, so check them against the aerial.</p>
+      </div>`;
+  }
+
+  function drawBldgMap(j) {
+    const el = document.getElementById("bmap");
+    const B = j.summary?.existing_buildings || [];
+    if (!el || !window.L || el._leaflet_id || !B.length) return;
+    const bm = L.map(el, { zoomControl: false, attributionControl: true, fadeAnimation: false, zoomAnimation: false });
+    const pg = j.parcel?.geometry;
+    let bounds = null;
+    try { if (pg) bounds = L.geoJSON(pg).getBounds(); } catch (_) {}
+    if (!bounds) bounds = L.latLngBounds(B.flatMap((b) => b.ring));
+    bm.fitBounds(bounds.pad(0.2));
+    L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+      maxZoom: 20, maxNativeZoom: 19, attribution: "Imagery © Esri" }).addTo(bm);
+    if (pg) L.geoJSON(pg, { style: () => ({ color: "#ff2b2b", weight: 2.5, fillOpacity: 0 }) }).addTo(bm);
+    const col = (id) => (state.edit.bact[id] === "demo" ? "#ff3b30" : "#2bff88");
+    const lyr = {};
+    B.forEach((b) => {
+      const l = L.polygon(b.ring, { color: col(b.id), weight: 2.5, fillColor: col(b.id), fillOpacity: 0.35 }).addTo(bm);
+      l.bindTooltip(`${b.id} · ${b.label} · ${num(b.area_sf)} SF`, { sticky: true });
+      l.on("click", () => setBldg(b.id, state.edit.bact[b.id] === "demo" ? "keep" : "demo"));
+      lyr[b.id] = l;
+    });
+    window._bldgLayers = lyr;
+    setTimeout(() => { bm.invalidateSize(); bm.fitBounds(bounds.pad(0.12)); }, 50);
+  }
+
+  function setBldg(id, v) {
+    state.edit.bact[id] = v;
+    const l = window._bldgLayers && window._bldgLayers[id];
+    if (l) { const c = v === "demo" ? "#ff3b30" : "#2bff88"; l.setStyle({ color: c, fillColor: c }); }
+    root.querySelectorAll(`.seg[data-id="${id}"]`).forEach((b) => { b.classList.remove("on", "keep", "demo"); if (b.dataset.v === v) b.classList.add("on", v); });
   }
 
   function drawRoadMap(j) {
@@ -557,6 +613,7 @@
             <div><span>Remaining land</span><b>${num(m.remaining_developable_acres, 2)} ac</b></div>
           </div>
           ${(m.buildings || []).length ? `<div class="notes" style="margin-top:14px">${m.buildings.map((b) => `${esc((b.use || b.name || "").toString())} — ${num(b.w_ft)}' × ${num(b.d_ft)}' · ${num(b.footprint_sf)} SF${b.drive_thru ? " · drive-thru" : ""}`).join("\n")}</div>` : ""}
+          ${(m.existing || []).length ? `<div class="notes" style="margin-top:10px">${m.existing.map((x) => `Existing ${esc(x.id)} (${esc(x.label || "building")}, ${num(x.sf)} SF) — ${x.action === "demo" ? "demolished" : "remains"}`).join("\n")}</div>` : ""}
           ${(m.warnings || []).length ? `<div class="warnings">${m.warnings.map((w) => `<div>⚠ ${esc(w)}</div>`).join("")}</div>` : ""}
         </div>
         <div class="card">
@@ -589,6 +646,9 @@
       });
     });
     if (j.status === "awaiting_parcel") drawMap(j);
+    drawBldgMap(j);
+    main.querySelectorAll("[data-a=bact]").forEach((b) => b.addEventListener("click", () => setBldg(b.dataset.id, b.dataset.v)));
+    main.querySelectorAll("[data-a=ball]").forEach((b) => b.addEventListener("click", () => (j.summary?.existing_buildings || []).forEach((x) => setBldg(x.id, b.dataset.v))));
     if (main.querySelector(".droads")) {
       drawRoadMap(j);
       // single-road (no map) case: radios still update the choice
