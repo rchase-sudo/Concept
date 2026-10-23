@@ -669,8 +669,9 @@
     const designCard = !approved ? "" : `
       <div class="card" style="padding:14px 16px;margin-bottom:16px">
         <div class="row"><div><h3 style="margin:0">Full design: preliminary plan set</h3>
-          <div class="note">Title sheet, existing conditions, site, erosion control and demolition, grading, drainage, profiles, utilities, fire, landscape and lighting (no detail sheets). Not sealed.</div></div>
+          <div class="note">Title sheet, existing conditions, site, erosion control and demolition, grading, drainage, profiles, utilities, fire, landscape and lighting (no detail sheets). Not sealed. Municipal utilities run from the road selected as the main road, inside the property.</div></div>
           <span class="spacer"></span>
+          ${DSP ? "" : `<select id="dsgUtil" style="margin-right:8px" title="Water and sewer for the plan set"><option value="municipal"${(j.zoning?.design_utilities || "municipal") === "municipal" ? " selected" : ""}>Municipal water and sewer</option><option value="onsite"${j.zoning?.design_utilities === "onsite" ? " selected" : ""}>On-site well and septic</option></select>`}
           ${DSP ? "" : dsg ? `<a class="btn primary sm" href="${dsg}" download="${esc(fileName(j, "Plan Set", "pdf"))}" target="_blank" rel="noopener">Download plan set (PDF)</a>
             <button class="btn sm" data-a="design" ${state.busy ? "disabled" : ""}>Rebuild</button>` :
             `<button class="btn primary" data-a="design" ${state.busy ? "disabled" : ""}>${state.busy ? "Starting…" : "Build full plan set"}</button>`}</div>
@@ -811,7 +812,7 @@
       case "findt": act({ action: "rerun", job_id: state.jobId, step: "topo" }); break;
       case "findb": act({ action: "rerun", job_id: state.jobId, step: "buildings" }); break;
       case "package": act({ action: "package", job_id: state.jobId }); break;
-      case "design": act({ action: "design", job_id: state.jobId }); break;
+      case "design": act({ action: "design", job_id: state.jobId, utilities: document.getElementById("dsgUtil")?.value || "municipal" }); break;
       case "retry": act({ action: "rerun", job_id: state.jobId, step: state.job.step || "parse" }); break;
       case "repick": state.error = ""; state.job.status = "awaiting_parcel"; renderMain(); break;
       case "editzoning": state.showZoningEditor = true; state.edit = null; if (state.job.status === "error") state.job.status = "awaiting_zoning"; renderMain(); break;
