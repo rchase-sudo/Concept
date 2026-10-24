@@ -669,7 +669,7 @@
     const designCard = !approved ? "" : `
       <div class="card" style="padding:14px 16px;margin-bottom:16px">
         <div class="row"><div><h3 style="margin:0">Full design: preliminary plan set</h3>
-          <div class="note">Title sheet, existing conditions, site, erosion control and demolition, grading, drainage, profiles, utilities, fire, landscape and lighting (no detail sheets). Not sealed. Municipal utilities run from the road selected as the main road, inside the property.</div></div>
+          <div class="note">Title sheet, existing conditions, site, erosion control and demolition, grading, drainage, utilities, landscape and lighting (no detail sheets). Not sealed. Municipal utilities run from the road selected as the main road, inside the property.</div></div>
           <span class="spacer"></span>
           ${DSP ? "" : `<select id="dsgUtil" style="margin-right:8px" title="Water and sewer for the plan set"><option value="municipal"${(j.zoning?.design_utilities || "municipal") === "municipal" ? " selected" : ""}>Municipal water and sewer</option><option value="onsite"${j.zoning?.design_utilities === "onsite" ? " selected" : ""}>On-site well and septic</option></select>`}
           ${DSP ? "" : dsg ? `<a class="btn primary sm" href="${dsg}" download="${esc(fileName(j, "Plan Set", "pdf"))}" target="_blank" rel="noopener">Download plan set (PDF)</a>
