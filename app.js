@@ -697,7 +697,7 @@
             <div><span>Remaining land</span><b>${num(m.remaining_developable_acres, 2)} ac</b></div>
           </div>
           ${(m.buildings || []).length ? `<div class="notes" style="margin-top:14px">${m.buildings.map((b) => `${esc((b.use || b.name || "").toString())} — ${num(b.w_ft)}' × ${num(b.d_ft)}' · ${num(b.footprint_sf)} SF${b.drive_thru ? " · drive-thru" : ""}`).join("\n")}</div>` : ""}
-          ${(m.existing || []).length ? `<div class="notes" style="margin-top:10px">${m.existing.map((x) => x.kind === "pavement" ? `Existing pavement ${esc(x.id)} (${esc(x.label || "pavement")}, ${num(x.sf)} SF) — ${x.action === "demo" ? "removed" : "reused"}` : `Existing ${esc(x.id)} (${esc(x.label || "building")}, ${num(x.sf)} SF) — ${x.action === "demo" ? "demolished" : "remains"}`).join("\n")}</div>` : ""}
+          ${(m.existing || []).filter((x) => x.action !== "demo").length ? `<div class="notes" style="margin-top:10px">${m.existing.filter((x) => x.action !== "demo").map((x) => x.kind === "pavement" ? `Existing pavement ${esc(x.id)} (${esc(x.label || "pavement")}, ${num(x.sf)} SF) — ${x.action === "demo" ? "removed" : "reused"}` : `Existing ${esc(x.id)} (${esc(x.label || "building")}, ${num(x.sf)} SF) — ${x.action === "demo" ? "demolished" : "remains"}`).join("\n")}</div>` : ""}
           ${m.earthwork ? `<div class="notes" style="margin-top:10px">Grading (rough): ${num(m.earthwork.cut_cy)} CY cut / ${num(m.earthwork.fill_cy)} CY fill · pad about ${num(m.earthwork.pad_ft, 0)} ft · ${num(m.earthwork.avg_slope_pct, 1)}% average slope</div>` : ""}
           ${(m.warnings || []).length ? `<div class="warnings">${m.warnings.map((w) => `<div>⚠ ${esc(w)}</div>`).join("")}</div>` : ""}
         </div>
