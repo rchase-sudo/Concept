@@ -143,6 +143,7 @@
     if (!buildings.length) { state.error = "Add at least one building."; renderMain(); return; }
     const j0 = state.job;
     const program = { ...(state.job.program || {}), use: e.use, buildings, parking: { ...(state.job.program?.parking || {}), required: n(e.required), calc: e.calc } };
+    if (String(e.minrlv ?? "").trim() === "") delete program.min_rlv; else program.min_rlv = n(e.minrlv);
     state.showZoningEditor = false;
     await act({ action: "approve_zoning", job_id: state.jobId, setbacks, parking_setbacks: pave, program, drive_road: e.drive || null,
       zoning: { max_slope_pct: +e.slope || 0, building_actions: Object.fromEntries((j0.summary?.existing_buildings || []).map((b) => [b.id, e.bact[b.id] === "demo" ? "demo" : "keep"])),
@@ -190,6 +191,7 @@
       buildings: (prog.buildings || []).map((b) => ({ name: b.name || "", use: b.use || "", label: b.label || "", footprint_sf: b.footprint_sf ?? "",
         depth_ft: b.depth_ft ?? "", stories: b.stories ?? 1, drive_thru: !!b.drive_thru })),
       required: prog.parking?.required ?? "",
+      minrlv: prog.min_rlv ?? "",     // minimum residual land value ($); blank = no minimum
       calc: prog.parking?.calc || prog.parking?.ratio_text || "",
       drive: z.drive_road || "",   // "" = automatic (longest frontage)
       slope: z.max_slope_pct === undefined ? "15" : (z.max_slope_pct ? String(z.max_slope_pct) : "0"),   // max slope (%) for building / parking; "0" = ignore slope
@@ -450,6 +452,11 @@
               <div style="flex:1;min-width:200px"><div class="note" style="margin-bottom:6px">Calculation</div>
                 <input class="fld" data-bind="calc" value="${esc(e.calc)}"></div>
             </div>
+            <div class="row" style="margin-top:16px">
+              <div style="width:220px"><div class="note" style="margin-bottom:6px">Minimum residual land value ($)</div>
+                <input class="fld num" inputmode="numeric" data-bind="minrlv" placeholder="blank = no minimum" value="${esc(e.minrlv)}"></div>
+              <div class="note" style="flex:1;min-width:200px;align-self:flex-end">Value at the market cap rate less all development costs, land excluded. The layout is flagged if it falls below this. Setting one adds a rent and cost research pass to the layout.</div>
+            </div>
             <div class="row" style="margin-top:18px"><span class="spacer"></span>
               ${state.showZoningEditor ? `<button class="btn ghost" data-a="canceledit">Cancel</button>` : ""}
               <button class="btn primary" data-a="approvezoning" ${state.busy ? "disabled" : ""}>${state.busy ? `<span class="spin" style="width:14px;height:14px"></span> Starting layout…` : "Generate layout"}</button></div>
@@ -695,6 +702,7 @@
             <div><span>Lot coverage</span><b>${num(m.lot_coverage_pct, 1)}%</b></div>
             <div><span>Development</span><b>${num(m.development_acres, 2)} ac</b></div>
             <div><span>Remaining land</span><b>${num(m.remaining_developable_acres, 2)} ac</b></div>
+            ${m.rlv ? `<div><span>Residual land value</span><b style="color:${m.rlv.ok ? "inherit" : "#e8a317"}">$${num(m.rlv.residual)} ${m.rlv.ok ? "≥" : "<"} $${num(m.rlv.min)} min</b></div>` : ""}
           </div>
           ${(m.buildings || []).length ? `<div class="notes" style="margin-top:14px">${m.buildings.map((b) => `${esc((b.use || b.name || "").toString())} — ${num(b.w_ft)}' × ${num(b.d_ft)}' · ${num(b.footprint_sf)} SF${b.drive_thru ? " · drive-thru" : ""}`).join("\n")}</div>` : ""}
           ${(m.existing || []).filter((x) => x.action !== "demo").length ? `<div class="notes" style="margin-top:10px">${m.existing.filter((x) => x.action !== "demo").map((x) => x.kind === "pavement" ? `Existing pavement ${esc(x.id)} (${esc(x.label || "pavement")}, ${num(x.sf)} SF) — ${x.action === "demo" ? "removed" : "reused"}` : `Existing ${esc(x.id)} (${esc(x.label || "building")}, ${num(x.sf)} SF) — ${x.action === "demo" ? "demolished" : "remains"}`).join("\n")}</div>` : ""}
