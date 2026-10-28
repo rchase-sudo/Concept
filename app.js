@@ -455,7 +455,7 @@
             <div class="row" style="margin-top:16px">
               <div style="width:220px"><div class="note" style="margin-bottom:6px">Minimum residual land value ($)</div>
                 <input class="fld num" inputmode="numeric" data-bind="minrlv" placeholder="blank = no minimum" value="${esc(e.minrlv)}"></div>
-              <div class="note" style="flex:1;min-width:200px;align-self:flex-end">Value (net sale proceeds for condos and for-sale homes, NOI at the market cap rate for rentals) less all development costs, land excluded. The program is grown (floors first where height allows, then building size) until the layout meets it, up to what the site can hold. Open space and wide building gaps give way first if that is what it takes. Adds a market research pass to the layout.</div>
+              <div class="note" style="flex:1;min-width:200px;align-self:flex-end">Value (net sale proceeds for condos and for-sale homes, NOI at the market cap rate for rentals) less all development costs, land excluded. The program is grown (floors first where height allows, then building size) until the layout meets it, up to what the site can hold. Open space and wide building gaps give way first if that is what it takes. Adds a market research pass to the layout. For the strongest residual land value use self-storage where the zoning permits it.</div>
             </div>
             <div class="row" style="margin-top:18px"><span class="spacer"></span>
               ${state.showZoningEditor ? `<button class="btn ghost" data-a="canceledit">Cancel</button>` : ""}
