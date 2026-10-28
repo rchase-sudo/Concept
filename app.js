@@ -455,7 +455,7 @@
             <div class="row" style="margin-top:16px">
               <div style="width:220px"><div class="note" style="margin-bottom:6px">Minimum residual land value ($)</div>
                 <input class="fld num" inputmode="numeric" data-bind="minrlv" placeholder="blank = no minimum" value="${esc(e.minrlv)}"></div>
-              <div class="note" style="flex:1;min-width:200px;align-self:flex-end">Value at the market cap rate less all development costs, land excluded. The layout is flagged if it falls below this. Setting one adds a rent and cost research pass to the layout.</div>
+              <div class="note" style="flex:1;min-width:200px;align-self:flex-end">Value at the market cap rate less all development costs, land excluded. The program is grown (floors first where height allows, then building size) until the layout meets it, up to what the site can hold. Adds a rent and cost research pass to the layout.</div>
             </div>
             <div class="row" style="margin-top:18px"><span class="spacer"></span>
               ${state.showZoningEditor ? `<button class="btn ghost" data-a="canceledit">Cancel</button>` : ""}
@@ -703,6 +703,7 @@
             <div><span>Development</span><b>${num(m.development_acres, 2)} ac</b></div>
             <div><span>Remaining land</span><b>${num(m.remaining_developable_acres, 2)} ac</b></div>
             ${m.rlv ? `<div><span>Residual land value</span><b style="color:${m.rlv.ok ? "inherit" : "#e8a317"}">$${num(m.rlv.residual)} ${m.rlv.ok ? "≥" : "<"} $${num(m.rlv.min)} min</b></div>` : ""}
+            ${m.rlv && m.rlv.sized ? `<div><span>Sized to minimum</span><b>${num(m.rlv.base_gfa_sf)} → ${num(m.rlv.gfa_sf)} SF</b></div>` : ""}
           </div>
           ${(m.buildings || []).length ? `<div class="notes" style="margin-top:14px">${m.buildings.map((b) => `${esc((b.use || b.name || "").toString())} — ${num(b.w_ft)}' × ${num(b.d_ft)}' · ${num(b.footprint_sf)} SF${b.drive_thru ? " · drive-thru" : ""}`).join("\n")}</div>` : ""}
           ${(m.existing || []).filter((x) => x.action !== "demo").length ? `<div class="notes" style="margin-top:10px">${m.existing.filter((x) => x.action !== "demo").map((x) => x.kind === "pavement" ? `Existing pavement ${esc(x.id)} (${esc(x.label || "pavement")}, ${num(x.sf)} SF) — ${x.action === "demo" ? "removed" : "reused"}` : `Existing ${esc(x.id)} (${esc(x.label || "building")}, ${num(x.sf)} SF) — ${x.action === "demo" ? "demolished" : "remains"}`).join("\n")}</div>` : ""}
