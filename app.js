@@ -453,7 +453,7 @@
                 <input class="fld" data-bind="calc" value="${esc(e.calc)}"></div>
             </div>
             <div class="row" style="margin-top:16px">
-              <div style="width:220px"><div class="note" style="margin-bottom:6px">Minimum residual land value ($, on top of land cost)</div>
+              <div style="width:220px"><div class="note" style="margin-bottom:6px">Minimum residual land value ($, excludes the land price)</div>
                 <input class="fld num" inputmode="numeric" data-bind="minrlv" placeholder="blank = no minimum" value="${esc(e.minrlv)}"></div>
               <div class="note" style="flex:1;min-width:200px;align-self:flex-end">Value (net sale proceeds for condos and for-sale homes, NOI at the market cap rate for rentals) less all development costs, land excluded. The program is grown (floors first where height allows, then building size) until the layout meets it, up to what the site can hold. Open space and wide building gaps give way first if that is what it takes. Adds a market research pass to the layout. For the strongest residual land value use self-storage where the zoning permits it.</div>
             </div>
@@ -702,8 +702,7 @@
             <div><span>Lot coverage</span><b>${num(m.lot_coverage_pct, 1)}%</b></div>
             <div><span>Development</span><b>${num(m.development_acres, 2)} ac</b></div>
             <div><span>Remaining land</span><b>${num(m.remaining_developable_acres, 2)} ac</b></div>
-            ${m.rlv ? `<div><span>Residual land value</span><b style="color:${m.rlv.ok ? "inherit" : "#e8a317"}">$${num(m.rlv.residual)} ${m.rlv.ok ? "≥" : "<"} $${num(m.rlv.min)} needed</b></div>
-            <div><span>Land cost (price + closing)</span><b>$${num(m.rlv.land_cost)} · ${m.rlv.after_land >= 0 ? "+" : "−"}$${num(Math.abs(m.rlv.after_land))} after land</b></div>` : ""}
+            ${m.rlv ? `<div><span>Residual land value</span><b style="color:${m.rlv.ok ? "inherit" : "#e8a317"}">$${num(m.rlv.residual)} ${m.rlv.ok ? "≥" : "<"} $${num(m.rlv.min)} needed</b></div>` : ""}
             ${m.rlv && m.rlv.sized ? `<div><span>Sized to minimum</span><b>${num(m.rlv.base_gfa_sf)} → ${num(m.rlv.gfa_sf)} SF</b></div>` : ""}
             ${m.rlv && m.rlv.open_space_reduced ? `<div><span>Open space</span><b>reduced for value</b></div>` : ""}
           </div>
