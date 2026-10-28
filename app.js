@@ -144,6 +144,7 @@
     const j0 = state.job;
     const program = { ...(state.job.program || {}), use: e.use, buildings, parking: { ...(state.job.program?.parking || {}), required: n(e.required), calc: e.calc } };
     if (String(e.minrlv ?? "").trim() === "") delete program.min_rlv; else program.min_rlv = n(e.minrlv);
+    if (e.denseok) program.dense_ok = true; else { delete program.dense_ok; delete program.dense_layout; }
     state.showZoningEditor = false;
     await act({ action: "approve_zoning", job_id: state.jobId, setbacks, parking_setbacks: pave, program, drive_road: e.drive || null,
       zoning: { max_slope_pct: +e.slope || 0, building_actions: Object.fromEntries((j0.summary?.existing_buildings || []).map((b) => [b.id, e.bact[b.id] === "demo" ? "demo" : "keep"])),
@@ -192,6 +193,7 @@
         depth_ft: b.depth_ft ?? "", stories: b.stories ?? 1, drive_thru: !!b.drive_thru })),
       required: prog.parking?.required ?? "",
       minrlv: prog.min_rlv ?? "",     // minimum residual land value ($); blank = no minimum
+      denseok: !!prog.dense_ok,       // dense row-and-aisle layout allowed when the standard layout cannot reach the minimum
       calc: prog.parking?.calc || prog.parking?.ratio_text || "",
       drive: z.drive_road || "",   // "" = automatic (longest frontage)
       slope: z.max_slope_pct === undefined ? "15" : (z.max_slope_pct ? String(z.max_slope_pct) : "0"),   // max slope (%) for building / parking; "0" = ignore slope
@@ -457,6 +459,7 @@
                 <input class="fld num" inputmode="numeric" data-bind="minrlv" placeholder="blank = no minimum" value="${esc(e.minrlv)}"></div>
               <div class="note" style="flex:1;min-width:200px;align-self:flex-end">Value (net sale proceeds for condos and for-sale homes, NOI at the market cap rate for rentals) less all development costs, land excluded. The program is grown (floors first where height allows, then building size) until the layout meets it, up to what the site can hold. Open space and wide building gaps give way first if that is what it takes. Adds a market research pass to the layout. For the strongest residual land value use self-storage where the zoning permits it.</div>
             </div>
+            <label class="note" style="display:block;margin-top:10px"><input type="checkbox" data-bind="denseok" ${e.denseok ? "checked" : ""} style="accent-color:var(--accent)"> Dense layout if needed: when the standard layout cannot reach the minimum, pack the buildings in rows with drive aisles (more building area, less pavement and open space)</label>
             <div class="row" style="margin-top:18px"><span class="spacer"></span>
               ${state.showZoningEditor ? `<button class="btn ghost" data-a="canceledit">Cancel</button>` : ""}
               <button class="btn primary" data-a="approvezoning" ${state.busy ? "disabled" : ""}>${state.busy ? `<span class="spin" style="width:14px;height:14px"></span> Starting layout…` : "Generate layout"}</button></div>
