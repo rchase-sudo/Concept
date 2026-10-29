@@ -31,7 +31,7 @@
   const STEP_OF = { queued: 0, parsing: 0, awaiting_parcel: 0, parcel_approved: 1, building_ec: 1, ec_ready: 2, researching_zoning: 2,
     awaiting_zoning: 2, zoning_approved: 3, building_layout: 3, awaiting_layout: 3, layout_approved: 4 };
   const ERR_STEP_IDX = { parse: 0, ec: 1, zoning: 2, layout: 3 };
-  const LABEL = { queued: "Queued", parsing: "Reading listing", awaiting_parcel: "Confirm parcel", parcel_approved: "Starting site survey",
+  const LABEL = { batch_done: "Batch done", batch_running: "Batch running", queued: "Queued", parsing: "Reading listing", awaiting_parcel: "Confirm parcel", parcel_approved: "Starting site survey",
     building_ec: "Existing conditions", ec_ready: "Existing conditions ready", researching_zoning: "Researching zoning",
     awaiting_zoning: "Confirm zoning & program", zoning_approved: "Starting layout", building_layout: "Laying out the site",
     awaiting_layout: "Review layout", layout_approved: "Approved", error: "Error" };
