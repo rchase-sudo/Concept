@@ -130,6 +130,9 @@
   // one line per child: where it is, and whether it is finished
   function batchState(k) {
     if (k.status === "error") return { phase: "error", text: "Error", detail: k.error || "" };
+    if (k.options?.lite && k.preview_status === "built") return { phase: "done", text: "Preview page ready" };
+    if (k.options?.lite && k.preview_status === "error") return { phase: "error", text: "Preview page failed" };
+    if (k.status === "awaiting_parcel" && String(k.progress || "").startsWith("Needs parcel confirmation")) return { phase: "error", text: "Needs attention", detail: k.progress };
     if (k.package_status === "completed") return { phase: "done", text: "Package ready" };
     if (k.package_status === "failed") return { phase: "error", text: "Package failed" };
     if (k.package_status) return { phase: "running", text: "Writing the package" };
@@ -146,8 +149,9 @@
         <div class="s"><span class="dot ${b.phase === "done" ? "ok" : b.phase === "error" ? "err" : "run"}"></span>${esc(b.text)}${b.detail ? ` — ${esc(String(b.detail).slice(0, 140))}` : ""}</div>
       </button>`; }).join("");
     return `
-      <div class="row"><div class="eyebrow">Batch · ${p?.options?.lite ? "Lite" : "Full"} packages</div></div>
-      <h1 class="title">${kids.length ? `${done} of ${kids.length} packages ready` : "Starting the batch"}</h1>
+      <div class="row"><div class="eyebrow">Batch · ${p?.options?.lite ? "Lite" : "Full"} packages</div><span class="spacer"></span>
+        <button class="btn sm danger" data-a="deletebatch">Delete batch</button></div>
+      <h1 class="title">${kids.length ? `${done} of ${kids.length} ${p?.options?.lite ? "preview pages" : "packages"} ready` : "Starting the batch"}</h1>
       <div class="sub">${esc(p?.progress || "")}${bad ? ` · ${bad} need attention` : ""}. Each listing runs on its own with no approval steps, so you can leave this page.
         Finished concepts are in your Concepts list, and Claude can pull them from the batch.</div>
       ${state.error ? `<div class="err-box" style="margin-bottom:14px">${esc(state.error)}</div>` : ""}
@@ -229,6 +233,15 @@
       await refreshJob(true).catch(() => {});
     }
     state.busy = false; renderMain();
+  }
+
+  async function deleteBatch() {
+    const ids = [...state.batchJobs.map((k) => k.id), state.batchId].filter(Boolean);
+    if (!confirm(`Delete this batch and its ${state.batchJobs.length} listing${state.batchJobs.length === 1 ? "" : "s"}? This cannot be undone.`)) return;
+    try { for (const id of ids) await api({ action: "delete", job_id: id }); } catch (e) { alert(e.message); return; }
+    state.view = "new"; state.batchId = null; state.batchJobs = []; state.batchParent = null;
+    clearTimeout(pollTimer); history.replaceState(null, "", "#");
+    await loadJobs(); render();
   }
 
   async function deleteJob() {
@@ -915,6 +928,7 @@
       case "editzoning": state.showZoningEditor = true; state.edit = null; if (state.job.status === "error") state.job.status = "awaiting_zoning"; renderMain(); break;
       case "canceledit": state.showZoningEditor = false; renderMain(); break;
       case "delete": deleteJob(); break;
+      case "deletebatch": deleteBatch(); break;
       case "addb": state.edit.buildings.push({ label: "", use: "", footprint_sf: "", depth_ft: 60, stories: 1, drive_thru: false }); renderMain(); break;
       case "rmb": state.edit.buildings.splice(+t.dataset.i, 1); renderMain(); break;
       case "zoom": openLightbox(t.dataset.src); break;
