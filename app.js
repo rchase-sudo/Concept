@@ -12,6 +12,10 @@
     jobId: null,
     job: null,                // full status payload
     listingText: "",
+    mode: "single",           // new-concept form: "single" | "batch"
+    tier: "full",             // package research: "full" | "lite"
+    unattended: false,        // single project: skip the approval checkpoints
+    batchId: null, batchJobs: [], batchParent: null,
     busy: false,
     error: "",
     sel: new Set(),           // selected parcel candidate indexes
@@ -71,7 +75,7 @@
 
   // ------------------------------------------------------------- data
   async function loadJobs() {
-    try { state.jobs = (await api({ action: "list", limit: 50 })).jobs || []; }
+    try { state.jobs = (await api({ action: "list", limit: 100 })).jobs || []; }
     catch (e) { console.warn(e); }
     state.jobsLoading = false;
     renderSide();
@@ -101,6 +105,55 @@
     }
   }
 
+  // ------------------------------------------------------------- batches
+  async function openBatch(id) {
+    state.view = "batch"; state.batchId = id; state.jobId = null; state.job = null; state.error = "";
+    history.replaceState(null, "", `#batch=${id}`);
+    clearTimeout(pollTimer);
+    render();
+    await refreshBatch();
+  }
+
+  async function refreshBatch() {
+    if (state.view !== "batch" || !state.batchId) return;
+    try {
+      const rows = (await api({ action: "list", batch: state.batchId, limit: 100 })).jobs || [];
+      state.batchParent = rows.find((r) => r.id === state.batchId) || state.batchParent;
+      state.batchJobs = rows.filter((r) => r.id !== state.batchId).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+      renderMain(); renderSide();
+    } catch (e) { state.error = e.message; renderMain(); }
+    const open = !state.batchJobs.length || state.batchJobs.some((k) => batchState(k).phase === "running") || state.batchParent?.status === "queued" || state.batchParent?.status === "batch_running" && !state.batchJobs.length;
+    clearTimeout(pollTimer);
+    if (state.view === "batch" && open) pollTimer = setTimeout(refreshBatch, 6000);
+  }
+
+  // one line per child: where it is, and whether it is finished
+  function batchState(k) {
+    if (k.status === "error") return { phase: "error", text: "Error", detail: k.error || "" };
+    if (k.package_status === "completed") return { phase: "done", text: "Package ready" };
+    if (k.package_status === "failed") return { phase: "error", text: "Package failed" };
+    if (k.package_status) return { phase: "running", text: "Writing the package" };
+    if (k.status === "layout_approved") return { phase: "running", text: k.render_status === "failed" ? "Render failed" : "Rendering" };
+    return { phase: k.render_status === "failed" ? "error" : "running", text: LABEL[k.status] || k.status };
+  }
+
+  function viewBatch() {
+    const kids = state.batchJobs, p = state.batchParent;
+    const done = kids.filter((k) => batchState(k).phase === "done").length, bad = kids.filter((k) => batchState(k).phase === "error").length;
+    const rows = kids.map((k) => { const b = batchState(k); return `
+      <button class="job-item" data-a="open" data-id="${k.id}" style="width:100%;margin-bottom:6px">
+        <div class="t">${esc(jobTitle(k))}${jobPlace(k) ? ` <span class="note">· ${esc(jobPlace(k))}</span>` : ""}</div>
+        <div class="s"><span class="dot ${b.phase === "done" ? "ok" : b.phase === "error" ? "err" : "run"}"></span>${esc(b.text)}${b.detail ? ` — ${esc(String(b.detail).slice(0, 140))}` : ""}</div>
+      </button>`; }).join("");
+    return `
+      <div class="row"><div class="eyebrow">Batch · ${p?.options?.lite ? "Lite" : "Full"} packages</div></div>
+      <h1 class="title">${kids.length ? `${done} of ${kids.length} packages ready` : "Starting the batch"}</h1>
+      <div class="sub">${esc(p?.progress || "")}${bad ? ` · ${bad} need attention` : ""}. Each listing runs on its own with no approval steps, so you can leave this page.
+        Finished concepts are in your Concepts list, and Claude can pull them from the batch.</div>
+      ${state.error ? `<div class="err-box" style="margin-bottom:14px">${esc(state.error)}</div>` : ""}
+      <div style="margin-top:18px">${rows || `<div class="card working"><div class="spin"></div><div><div class="w1">${esc(p?.progress || "Splitting the listings")}</div></div></div>`}</div>`;
+  }
+
   function schedulePoll() {
     clearTimeout(pollTimer);
     const j = state.job;
@@ -115,10 +168,17 @@
     if (text.length < 20) { state.error = "Add the property: an address or parcel ID, and the town and state."; renderMain(); return; }
     state.busy = true; state.error = ""; renderMain();
     try {
-      const { job_id } = await api({ action: "start", listing_text: text, source: "tool" });
-      state.listingText = "";
-      await loadJobs();
-      await openJob(job_id);
+      if (state.mode === "batch") {
+        const { job_id } = await api({ action: "start_batch", text, lite: state.tier === "lite" });
+        state.listingText = "";
+        await loadJobs();
+        await openBatch(job_id);
+      } else {
+        const { job_id } = await api({ action: "start", listing_text: text, source: "tool", options: { lite: state.tier === "lite", auto: state.unattended } });
+        state.listingText = "";
+        await loadJobs();
+        await openJob(job_id);
+      }
     } catch (e) { state.error = e.message; }
     state.busy = false; renderMain();
   }
@@ -222,13 +282,19 @@
   function renderSide() {
     const side = root.querySelector("#side");
     if (!side) return;
-    const items = state.jobs.map((j) => `
+    const batches = state.jobs.filter((j) => j.options?.batch_parent).map((j) => `
+      <button class="job-item ${j.id === state.batchId && state.view === "batch" ? "active" : ""}" data-a="openbatch" data-id="${j.id}">
+        <div class="t">Batch${j.options?.lite ? " · Lite" : ""}</div>
+        <div class="s"><span class="dot ${j.status === "error" ? "err" : "run"}"></span>${esc(j.progress || j.status)} · ${esc(when(j.created_at))}</div>
+      </button>`).join("");
+    const items = state.jobs.filter((j) => !j.options?.batch_parent).map((j) => `
       <button class="job-item ${j.id === state.jobId && state.view === "job" ? "active" : ""}" data-a="open" data-id="${j.id}">
-        <div class="t">${esc(jobTitle(j))}</div>
+        <div class="t">${esc(jobTitle(j))}${j.options?.lite ? ` <span class="note">· Lite</span>` : ""}</div>
         <div class="s"><span class="dot ${dotClass(j.status)}"></span>${esc(LABEL[j.status] || j.status)} · ${esc(when(j.created_at))}</div>
       </button>`).join("");
     side.innerHTML = `
       <button class="btn primary" data-a="new" style="justify-content:center">+ New concept</button>
+      ${batches ? `<h4>Batches</h4>${batches}` : ""}
       <h4>Concepts</h4>
       ${state.jobsLoading ? `<div class="note" style="padding:6px">Loading…</div>` : items || `<div class="note" style="padding:6px">No concepts yet.</div>`}`;
   }
@@ -238,6 +304,7 @@
     if (!main) return;
     if (map) { try { map.off(); map.remove(); } catch (_) {} map = null; }
     if (state.view === "new") { main.innerHTML = viewNew(); bindNew(main); return; }
+    if (state.view === "batch") { main.innerHTML = viewBatch(); return; }
     const j = state.job;
     if (!j) {
       main.innerHTML = state.error
@@ -251,19 +318,31 @@
 
   // ------------------------------------------------------------- views
   function viewNew() {
+    const batch = state.mode === "batch", lite = state.tier === "lite";
+    const seg = (key, val, label) => `<button type="button" class="btn sm ${state[key] === val ? "primary" : "ghost"}" data-a="set" data-k="${key}" data-v="${val}">${label}</button>`;
     return `
-      <div class="eyebrow">New concept</div>
-      <h1 class="title">Describe the site</h1>
-      <p class="sub">Give Drafted the property and, if you like, what you want on it: an address or parcel ID, the acreage, and a short prompt.
+      <div class="eyebrow">${batch ? "New batch" : "New concept"}</div>
+      <h1 class="title">${batch ? "Paste the listings" : "Describe the site"}</h1>
+      <p class="sub">${batch
+        ? "Paste any number of listing descriptions into the one field (up to 40). Drafted splits them, then runs every listing on its own, with no approval steps: parcel, existing conditions, zoning, layout, render and package."
+        : `Give Drafted the property and, if you like, what you want on it: an address or parcel ID, the acreage, and a short prompt.
         A full listing page pasted in works too. Drafted finds the parcel, maps existing conditions, researches zoning and setbacks,
-        and lays out the site. You confirm the parcel, the zoning and the layout along the way.</p>
+        and lays out the site. You confirm the parcel, the zoning and the layout along the way.`}</p>
       <div class="card" style="margin-top:22px">
-        <textarea class="listing" id="listing" placeholder="2839 US 70 Hwy, Durham, NC 27703 · about 4 acres&#10;Retail strip with a sit-down restaurant, parking in front.">${esc(state.listingText)}</textarea>
+        <div class="row" style="margin-bottom:14px;gap:18px;flex-wrap:wrap">
+          <span class="note">Start</span><span class="row" style="gap:6px">${seg("mode", "single", "One project")}${seg("mode", "batch", "Batch")}</span>
+          <span class="note">Package</span><span class="row" style="gap:6px">${seg("tier", "full", "Full")}${seg("tier", "lite", "Lite")}</span>
+        </div>
+        <div class="note" style="margin-bottom:12px">${lite
+          ? "Lite: same plan, same render. Zoning gets a short search and the package pricing comes from regional benchmarks instead of local research (about a third of the cost). Rents, costs and fees are estimates."
+          : "Full: researched zoning and locally researched costs, rents and fees."}</div>
+        <textarea class="listing" id="listing" placeholder="${batch ? "Paste all the listings here, one after another.&#10;A blank line or a heading between them is enough: Drafted works out where each one starts." : "2839 US 70 Hwy, Durham, NC 27703 · about 4 acres&#10;Retail strip with a sit-down restaurant, parking in front."}">${esc(state.listingText)}</textarea>
         ${state.error ? `<div class="err-box" style="margin-top:12px">${esc(state.error)}</div>` : ""}
         <div class="row" style="margin-top:14px">
-          <span class="note">Tip: a parcel ID (APN / PIN) pins the parcel instantly.</span>
+          ${batch ? `<span class="note">Each listing becomes its own concept. Nothing waits for you.</span>`
+                  : `<label class="note" style="display:flex;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" id="unatt" ${state.unattended ? "checked" : ""}> Run unattended (skip the approval steps)</label>`}
           <span class="spacer"></span>
-          <button class="btn primary" data-a="start" ${state.busy ? "disabled" : ""}>${state.busy ? "Starting…" : "Generate concept"}</button>
+          <button class="btn primary" data-a="start" ${state.busy ? "disabled" : ""}>${state.busy ? "Starting…" : batch ? "Run batch" : "Generate concept"}</button>
         </div>
       </div>`;
   }
@@ -731,6 +810,8 @@
   function bindNew(main) {
     const ta = main.querySelector("#listing");
     ta.addEventListener("input", () => { state.listingText = ta.value; });
+    const u = main.querySelector("#unatt");
+    if (u) u.addEventListener("change", () => { state.unattended = u.checked; });
     ta.focus();
   }
 
@@ -816,8 +897,10 @@
     if (t.classList.contains("cand")) return;
     switch (a) {
       case "signout": await sb.auth.signOut(); break;
-      case "new": state.view = "new"; state.jobId = null; state.job = null; state.error = ""; history.replaceState(null, "", "#"); clearTimeout(pollTimer); render(); break;
+      case "new": state.view = "new"; state.batchId = null; state.jobId = null; state.job = null; state.error = ""; history.replaceState(null, "", "#"); clearTimeout(pollTimer); render(); break;
       case "open": openJob(t.dataset.id); renderSide(); break;
+      case "openbatch": openBatch(t.dataset.id); break;
+      case "set": state[t.dataset.k] = t.dataset.v; renderMain(); break;
       case "start": startJob(); break;
       case "approveparcel": approveParcel(); break;
       case "approvezoning": approveZoning(); break;
@@ -902,11 +985,13 @@
     render();
     if (state.session) { await loadJobs(); routeFromHash(); }
     clearInterval(listTimer);
-    listTimer = setInterval(() => { if (state.session && state.jobs.some((j) => WORKING.has(j.status))) loadJobs(); }, 15000);
+    listTimer = setInterval(() => { if (state.session && (state.jobs.some((j) => WORKING.has(j.status)) || state.jobs.some((j) => j.options?.batch_parent))) loadJobs(); }, 15000);
   }
   function routeFromHash() {
     const m = location.hash.match(/job=([0-9a-f-]{36})/);
-    if (m) openJob(m[1]);
+    if (m) { openJob(m[1]); return; }
+    const b = location.hash.match(/batch=([0-9a-f-]{36})/);
+    if (b) openBatch(b[1]);
   }
   boot();
 })();
