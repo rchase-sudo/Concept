@@ -776,7 +776,7 @@
           <span class="spacer"></span>
           ${PVP ? "" : pv.status === "built" ? `<a class="btn primary sm" href="${esc(pv.url)}" target="_blank" rel="noopener">Open preview site</a>
             <button class="btn sm" data-a="preview" ${state.busy ? "disabled" : ""}>Rebuild</button>` :
-            `<span style="display:flex;gap:6px;align-items:center;margin-right:10px;font-size:13px"><label style="display:flex;gap:6px;align-items:center;cursor:pointer" title="Finds the agent's email and adds them to the Instantly Free Preview campaign + the CRM. Unticked: only the page is built."><input type="checkbox" id="pvPush"> Add agent to outreach</label></span>
+            `<span style="display:flex;gap:6px;align-items:center;margin-right:10px;font-size:13px"><label style="display:flex;gap:6px;align-items:center;cursor:pointer" title="Uses the agent email and name from the listing text (searches the web if missing) and adds them to the Instantly Free Preview campaign + the CRM, same as the lite pipeline. Unticked: only the page is built."><input type="checkbox" id="pvPush" checked> Add agent to Instantly + CRM</label></span>
             <button class="btn primary" data-a="preview" ${state.busy ? "disabled" : ""}>${state.busy ? "Starting…" : "Make preview site"}</button>`}</div>
         ${PVP ? `<div class="working" style="padding:12px 0 0"><div class="spin"></div><div><div class="w1">Building the preview page</div><div class="w2">About 1–2 minutes</div></div></div>` : ""}
         ${pv.status === "built" && !PVP ? `<div class="note" style="margin-top:10px"><a href="${esc(pv.url)}" target="_blank" rel="noopener">${esc(pv.display || pv.url)}</a>${pv.outreach?.instantly ? ` · Instantly: ${esc(pv.outreach.instantly)}` : ""}${pv.outreach?.crm ? ` · CRM: ${esc(pv.outreach.crm)}` : ""}</div>` : ""}
@@ -939,7 +939,7 @@
       case "findt": act({ action: "rerun", job_id: state.jobId, step: "topo" }); break;
       case "findb": act({ action: "rerun", job_id: state.jobId, step: "buildings" }); break;
       case "package": act({ action: "package", job_id: state.jobId }); break;
-      case "preview": act({ action: "preview", job_id: state.jobId, push: !!(document.getElementById("pvPush") && document.getElementById("pvPush").checked) }); break;
+      case "preview": act({ action: "preview", job_id: state.jobId, push: document.getElementById("pvPush") ? document.getElementById("pvPush").checked : true }); break;
       case "design": act({ action: "design", job_id: state.jobId, sewer: document.getElementById("dsgSewer") ? document.getElementById("dsgSewer").checked : true, water: document.getElementById("dsgWater") ? document.getElementById("dsgWater").checked : true }); break;
       case "retry": act({ action: "rerun", job_id: state.jobId, step: state.job.step || "parse" }); break;
       case "repick": state.error = ""; state.job.status = "awaiting_parcel"; renderMain(); break;
