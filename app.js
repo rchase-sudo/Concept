@@ -95,7 +95,7 @@
       const j = await api({ action: "status", job_id: state.jobId });
       const prev = state.job;
       const changed = force || !prev || prev.status !== j.status || prev.progress !== j.progress || prev.updated_at !== j.updated_at ||
-        prev.render_status !== j.render_status || prev.package_status !== j.package_status || prev.design_status !== j.design_status;
+        prev.render_status !== j.render_status || prev.package_status !== j.package_status || prev.design_status !== j.design_status || prev.summary?.preview?.status !== j.summary?.preview?.status;
       state.job = j;
       if (j.status === "awaiting_parcel" && state.sel.size === 0 && j.candidates?.length) state.sel = new Set([0]);
       if (changed) { renderMain(); if (prev?.status !== j.status) loadJobs(); }
@@ -162,7 +162,7 @@
     clearTimeout(pollTimer);
     const j = state.job;
     const renderPending = j && j.status === "layout_approved" && ["queued", "modeling", "rendering", "nanobanana", "compositing"].includes(j.render_status);
-    const pkgPending = j && (["queued", "researching", "writing", "typesetting"].includes(j.package_status) || ["queued", "designing"].includes(j.design_status));
+    const pkgPending = j && (["queued", "researching", "writing", "typesetting"].includes(j.package_status) || ["queued", "designing"].includes(j.design_status) || ["queued", "building"].includes(j.summary?.preview?.status));
     if (state.view === "job" && j && (WORKING.has(j.status) || renderPending || pkgPending)) pollTimer = setTimeout(() => refreshJob(), renderPending || pkgPending ? 6000 : 4000);
   }
 
@@ -224,6 +224,7 @@
       if (state.job && body.action === "approve_parcel") { state.job.status = "parcel_approved"; }
       if (state.job && body.action === "package") { state.job.package_status = "queued"; }
       if (state.job && body.action === "design") { state.job.design_status = "queued"; }
+      if (state.job && body.action === "preview") { state.job.summary = { ...(state.job.summary || {}), preview: { ...(state.job.summary?.preview || {}), status: "queued", reason: null } }; }
       if (state.job && body.action === "rerun") { state.job.status = { parse: "parsing", ec: "building_ec", zoning: "researching_zoning", layout: "building_layout" }[body.step] || state.job.status; }
       state.busy = false; renderMain(); window.scrollTo({ top: 0, behavior: "smooth" });
       await refreshJob(true); loadJobs();
@@ -765,6 +766,22 @@
           <div class="w2">Web research, proforma and typesetting · about 4–8 minutes</div></div></div>` : ""}
         ${j.package_status === "failed" ? `<div class="err-box" style="margin-top:10px">Package failed: ${esc(j.package_error || "unknown error")}</div>` : ""}
       </div>`;
+    const pv = j.summary?.preview || {};
+    const PVP = ["queued", "building"].includes(pv.status);
+    const pvReady = j.package_status === "completed" || j.options?.lite;
+    const pvCard = !(approved && j.render_status === "completed" && pvReady) ? "" : `
+      <div class="card" style="padding:14px 16px;margin-bottom:16px">
+        <div class="row"><div><h3 style="margin:0">Preview site</h3>
+          <div class="note">The same watermarked preview page the lite pipeline publishes (render, plan, investor numbers from this package, booking button), at its own link.</div></div>
+          <span class="spacer"></span>
+          ${PVP ? "" : pv.status === "built" ? `<a class="btn primary sm" href="${esc(pv.url)}" target="_blank" rel="noopener">Open preview site</a>
+            <button class="btn sm" data-a="preview" ${state.busy ? "disabled" : ""}>Rebuild</button>` :
+            `<span style="display:flex;gap:6px;align-items:center;margin-right:10px;font-size:13px"><label style="display:flex;gap:6px;align-items:center;cursor:pointer" title="Finds the agent's email and adds them to the Instantly Free Preview campaign + the CRM. Unticked: only the page is built."><input type="checkbox" id="pvPush"> Add agent to outreach</label></span>
+            <button class="btn primary" data-a="preview" ${state.busy ? "disabled" : ""}>${state.busy ? "Starting…" : "Make preview site"}</button>`}</div>
+        ${PVP ? `<div class="working" style="padding:12px 0 0"><div class="spin"></div><div><div class="w1">Building the preview page</div><div class="w2">About 1–2 minutes</div></div></div>` : ""}
+        ${pv.status === "built" && !PVP ? `<div class="note" style="margin-top:10px"><a href="${esc(pv.url)}" target="_blank" rel="noopener">${esc(pv.display || pv.url)}</a>${pv.outreach?.instantly ? ` · Instantly: ${esc(pv.outreach.instantly)}` : ""}${pv.outreach?.crm ? ` · CRM: ${esc(pv.outreach.crm)}` : ""}</div>` : ""}
+        ${pv.status === "error" ? `<div class="err-box" style="margin-top:10px">Preview failed: ${esc(pv.reason || "unknown error")}</div>` : ""}
+      </div>`;
     const dsg = f.design?.["plan_set.pdf"];
     const DSP = ["queued", "designing"].includes(j.design_status);
     const ds = j.design || {};
@@ -785,7 +802,7 @@
           <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:6px">${["T1","C1","C2","C3","C4","C5","C6","C7","C8"].filter(n => f.design?.[`sheet_${n}.png`]).map(n => `<a class="btn sm" href="${f.design[`sheet_${n}.png`]}" target="_blank" rel="noopener">${n}</a>`).join("")}</div>` : ""}
         ${j.design_status === "failed" ? `<div class="err-box" style="margin-top:10px">Plan set failed: ${esc(j.design_error || "unknown error")}</div>` : ""}
       </div>`;
-    return `${pkgCard}${designCard}${renderCard}
+    return `${pkgCard}${pvCard}${designCard}${renderCard}
       <div class="card" style="padding:12px">${png ? `<img class="plan" src="${png}" data-a="zoom" data-src="${png}" alt="Concept plan">` : `<div class="note">Plan image missing.</div>`}</div>
       <div class="grid2" style="margin-top:16px">
         <div class="card">
@@ -922,6 +939,7 @@
       case "findt": act({ action: "rerun", job_id: state.jobId, step: "topo" }); break;
       case "findb": act({ action: "rerun", job_id: state.jobId, step: "buildings" }); break;
       case "package": act({ action: "package", job_id: state.jobId }); break;
+      case "preview": act({ action: "preview", job_id: state.jobId, push: !!(document.getElementById("pvPush") && document.getElementById("pvPush").checked) }); break;
       case "design": act({ action: "design", job_id: state.jobId, sewer: document.getElementById("dsgSewer") ? document.getElementById("dsgSewer").checked : true, water: document.getElementById("dsgWater") ? document.getElementById("dsgWater").checked : true }); break;
       case "retry": act({ action: "rerun", job_id: state.jobId, step: state.job.step || "parse" }); break;
       case "repick": state.error = ""; state.job.status = "awaiting_parcel"; renderMain(); break;
