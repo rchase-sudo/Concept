@@ -161,8 +161,9 @@
   function schedulePoll() {
     clearTimeout(pollTimer);
     const j = state.job;
+    if (j && state.tfWaitOpen === j.id && j.summary?.testfit_status === "ready" && j.files?.testfit?.["base.json"]) { state.tfWaitOpen = null; setTimeout(openTestFit, 0); }
     const renderPending = j && j.status === "layout_approved" && ["queued", "modeling", "rendering", "nanobanana", "compositing"].includes(j.render_status);
-    const pkgPending = j && (["queued", "researching", "writing", "typesetting"].includes(j.package_status) || ["queued", "designing"].includes(j.design_status) || ["queued", "building"].includes(j.summary?.preview?.status));
+    const pkgPending = j && (["queued", "researching", "writing", "typesetting"].includes(j.package_status) || ["queued", "designing"].includes(j.design_status) || ["queued", "building"].includes(j.summary?.preview?.status) || j.summary?.testfit_status === "building");
     if (state.view === "job" && j && (WORKING.has(j.status) || renderPending || pkgPending)) pollTimer = setTimeout(() => refreshJob(), renderPending || pkgPending ? 6000 : 4000);
   }
 
@@ -193,7 +194,7 @@
     await act({ action: "approve_parcel", job_id: state.jobId, indexes: idx });
   }
 
-  async function approveZoning() {
+  async function approveZoning(manual = false) {
     const e = state.edit;
     const n = (v) => (v === "" || v === null || isNaN(+v)) ? null : +v;
     const setbacks = { front: n(e.sb.front), side: n(e.sb.side), rear: n(e.sb.rear) };
@@ -204,13 +205,13 @@
     const buildings = e.buildings.filter((b) => n(b.footprint_sf) > 0).map((b, i) => ({
       name: b.name || `Building ${String.fromCharCode(65 + i)}`, use: b.use || b.label, label: b.label || b.use,
       footprint_sf: n(b.footprint_sf), depth_ft: n(b.depth_ft) || 60, stories: n(b.stories) || 1, drive_thru: !!b.drive_thru }));
-    if (!buildings.length) { state.error = "Add at least one building."; renderMain(); return; }
+    if (!buildings.length && !manual) { state.error = "Add at least one building."; renderMain(); return; }
     const j0 = state.job;
     const program = { ...(state.job.program || {}), use: e.use, buildings, parking: { ...(state.job.program?.parking || {}), required: n(e.required), calc: e.calc } };
     if (String(e.minrlv ?? "").trim() === "") delete program.min_rlv; else program.min_rlv = n(e.minrlv);
     if (e.denseok) program.dense_ok = true; else { delete program.dense_ok; delete program.dense_layout; }
     state.showZoningEditor = false;
-    await act({ action: "approve_zoning", job_id: state.jobId, setbacks, parking_setbacks: pave, program, drive_road: e.drive || null,
+    await act({ action: "approve_zoning", job_id: state.jobId, setbacks, parking_setbacks: pave, program, drive_road: e.drive || null, manual: !!manual,
       zoning: { max_slope_pct: +e.slope || 0, building_actions: Object.fromEntries((j0.summary?.existing_buildings || []).map((b) => [b.id, e.bact[b.id] === "demo" ? "demo" : "keep"])),
         pavement_actions: Object.fromEntries((j0.summary?.existing_pavement || []).map((p) => [p.id, e.pact[p.id] === "remove" ? "remove" : "reuse"])),
         shared_stalls: Math.max(0, parseInt(e.sstalls, 10) || 0), tie_existing: e.tie !== false } });
@@ -439,6 +440,7 @@
         <div class="row" style="margin-top:14px">
           <button class="btn primary" data-a="retry" ${state.busy ? "disabled" : ""}>Retry this step</button>
           ${j.step === "layout" && j.zoning ? `<button class="btn" data-a="editzoning">Adjust zoning / program</button>` : ""}
+          ${j.step === "layout" && j.zoning?.layout_mode === "manual" ? `<button class="btn" data-a="testfit">Back to the test fit</button>` : ""}
           ${j.candidates?.length && j.step !== "parse" ? `<button class="btn" data-a="repick">Pick a different parcel</button>` : ""}
         </div>
       </div>`;
@@ -555,6 +557,7 @@
             <label class="note" style="display:block;margin-top:10px"><input type="checkbox" data-bind="denseok" ${e.denseok ? "checked" : ""} style="accent-color:var(--accent)"> Dense layout if needed: when the standard layout cannot reach the minimum, pack the buildings in rows with drive aisles (more building area, less pavement and open space)</label>
             <div class="row" style="margin-top:18px"><span class="spacer"></span>
               ${state.showZoningEditor ? `<button class="btn ghost" data-a="canceledit">Cancel</button>` : ""}
+              <button class="btn" data-a="approvezoningmanual" ${state.busy ? "disabled" : ""} title="Skip the automatic layout and lay the site out yourself over the existing conditions, setbacks and constraints">Lay out manually (test fit)</button>
               <button class="btn primary" data-a="approvezoning" ${state.busy ? "disabled" : ""}>${state.busy ? `<span class="spin" style="width:14px;height:14px"></span> Starting layout…` : "Generate layout"}</button></div>
             ${state.error ? `<div class="err-box" style="margin-top:12px">${esc(state.error)}</div>` : ""}
           </div>
@@ -721,8 +724,54 @@
     setTimeout(() => { rm.invalidateSize(); rm.fitBounds(bounds.pad(0.45)); }, 50);   // card is laid out by now
   }
 
+  function testfitButton(j, primary) {
+    const st = j.summary?.testfit_status;
+    if (st === "building") return `<span class="note" style="display:inline-flex;gap:8px;align-items:center"><span class="spin" style="width:14px;height:14px"></span> Preparing the test fit…</span>`;
+    const label = j.layout?.manual ? "Edit test fit" : primary ? "Open the test-fit editor" : "Edit in test fit";
+    return `<button class="btn ${primary ? "primary" : ""}" data-a="testfit" ${state.busy ? "disabled" : ""} title="Lay out or adjust the site by hand">${label}</button>
+      ${st === "failed" ? `<div class="err-box" style="margin-top:10px">Preparing the test fit failed: ${esc(j.summary?.testfit_error || "unknown error")}</div>` : ""}`;
+  }
+
+  async function openTestFit() {
+    const j = state.job;
+    if (!j || !window.TestFit) return;
+    const url = j.files?.testfit?.["base.json"];
+    if (!url || state.tfPrepared === j.id + ":retry") {
+      // jobs laid out before the editor existed: the worker prepares the site data first (about a minute)
+      state.tfPrepared = j.id;
+      await act({ action: "testfit_base", job_id: j.id });
+      state.tfWaitOpen = j.id;
+      return;
+    }
+    state.busy = true; renderMain();
+    let base;
+    try { const r = await fetch(url); if (!r.ok) throw new Error(`HTTP ${r.status}`); base = await r.json(); }
+    catch (e) { state.busy = false; state.error = "Could not load the test-fit site data: " + e.message; renderMain(); return; }
+    state.busy = false; renderMain();
+    const L = j.listing || {};
+    window.TestFit.open({
+      base, jobId: j.id, aerialUrl: j.files?.ec?.["aerial.jpg"], design: j.summary?.testfit_design,
+      title: [L.street_address, L.city, L.state].filter(Boolean).join(", "),
+      onSave: async (design) => { await api({ action: "testfit_save", job_id: j.id, design }); state.job.summary = { ...(state.job.summary || {}), testfit_design: { ...design, saved_at: new Date().toISOString() } }; },
+      onSubmit: async (design) => {
+        await api({ action: "testfit_submit", job_id: j.id, design });
+        state.job.status = "building_layout"; state.job.progress = "Drawing your test fit"; renderMain(); await refreshJob(true); loadJobs();
+      },
+      onClose: () => renderMain(),
+    });
+  }
+
   function viewLayout(j) {
     const m = j.layout || {}, f = j.files || {};
+    if (m.manual_pending) return `
+      <div class="card" style="padding:22px">
+        <div class="eyebrow">Manual layout</div>
+        <h3 style="margin:6px 0 6px">Lay out the site in the test fit</h3>
+        <p class="note" style="margin:0 0 14px">The existing conditions, setbacks, wetlands, flood zones, steep ground and roads are ready. Place buildings, parking fields, drives and ponds; parking, coverage, FAR and impervious update as you go. Send it to the concept plan when it works, and the job continues as usual (render, package, plan set).</p>
+        ${testfitButton(j, true)}
+        ${state.error ? `<div class="err-box" style="margin-top:12px">${esc(state.error)}</div>` : ""}
+      </div>
+      ${f.ec?.["existing_conditions.png"] ? `<div class="card" style="padding:12px;margin-top:16px"><img class="plan" src="${f.ec["existing_conditions.png"]}" data-a="zoom" data-src="${f.ec["existing_conditions.png"]}" alt="Existing conditions"></div>` : ""}`;
     const png = f.layout?.["concept_plan.png"];
     const dls = [
       ["Concept plan (PDF)", f.layout?.["concept_plan.pdf"], fileName(j, "Concept Plan", "pdf")],
@@ -832,6 +881,7 @@
           <p class="note" style="margin-top:12px">Sheets are ANSI D (34×22). DXFs are in state-plane feet with Forma layers.</p>
           <div class="row" style="margin-top:18px">
             <button class="btn" data-a="editzoning">Adjust zoning / program</button>
+            ${testfitButton(j, false)}
             <span class="spacer"></span>
             ${approved ? `<span class="tag g">Approved</span>` : `<button class="btn primary" data-a="approvelayout" ${state.busy ? "disabled" : ""}>${state.busy ? "Starting render…" : "Approve layout &amp; render"}</button>`}
           </div>
@@ -937,6 +987,8 @@
       case "start": startJob(); break;
       case "approveparcel": approveParcel(); break;
       case "approvezoning": approveZoning(); break;
+      case "approvezoningmanual": approveZoning(true); break;
+      case "testfit": openTestFit(); break;
       case "approvelayout": act({ action: "approve_layout", job_id: state.jobId }); break;
       case "rerender": act({ action: "render", job_id: state.jobId }); break;
       case "findt": act({ action: "rerun", job_id: state.jobId, step: "topo" }); break;
