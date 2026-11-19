@@ -7,7 +7,26 @@
 // window.TestFit.open({ base, aerialUrl, design, title, onSave(design), onSubmit(design), onClose() })
 (function () {
   "use strict";
-  const SW = 9, SD = 18, AIS = 24, WALK = 6, ISL = 10;
+  const SW = 9, SD = 18, AIS = 24, AIS1 = 20, WALK = 6, ISL = 10;
+  // traffic arrow outline (feet): stem + head, pointing along dir, centred on at
+  function arrowPts(at, dir, L = 14) {
+    const m = Math.hypot(dir[0], dir[1]) || 1, ux = dir[0] / m, uy = dir[1] / m, nx = -uy, ny = ux;
+    return [[-L / 2, -0.8], [L / 2 - 4.5, -0.8], [L / 2 - 4.5, -2.6], [L / 2, 0], [L / 2 - 4.5, 2.6], [L / 2 - 4.5, 0.8], [-L / 2, 0.8]]
+      .map(([x, y]) => [at[0] + ux * x + nx * y, at[1] + uy * x + ny * y]);
+  }
+  function driveArrows(d) {          // drives are two-way: a pair of arrows on each straight run, keep-right
+    const out = [], w = +d.width || 24;
+    for (let i = 1; i < d.pts.length; i++) {
+      const a = d.pts[i - 1], b = d.pts[i], L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (L < 45) continue;
+      const ux = (b[0] - a[0]) / L, uy = (b[1] - a[1]) / L, nx = -uy, ny = ux, n = Math.max(1, Math.round(L / 90));
+      for (let k = 0; k < n; k++) {
+        const t = L * (k + 0.5) / n, cx = a[0] + ux * t, cy = a[1] + uy * t;
+        out.push({ at: [cx - nx * w / 4 - ux * 9, cy - ny * w / 4 - uy * 9], dir: [ux, uy] }, { at: [cx + nx * w / 4 + ux * 9, cy + ny * w / 4 + uy * 9], dir: [-ux, -uy] });
+      }
+    }
+    return out;
+  }
   const ADA = [[25, 1], [50, 2], [75, 3], [100, 4], [150, 5], [200, 6], [300, 7], [400, 8], [500, 9]];
   const adaReq = (n) => { for (const [lim, r] of ADA) if (n <= lim) return r; return n <= 1000 ? Math.ceil(n * 0.02) : 20 + Math.ceil((n - 1000) / 100); };
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -22,6 +41,24 @@
     return [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]].map(([x, y]) => { const [u, v] = rot(x, y, a); return [o.cx + u, o.cy + v]; });
   }
   const toLocal = (o, p) => rot(p[0] - o.cx, p[1] - o.cy, -rad(o.rot || 0));
+  // a building is its main block plus optional wings (rectangles in the block's own axes), so every corner stays 90 degrees
+  const wingObj = (b, wg, g = 0) => { const [x, y] = rot(wg.u, wg.v, rad(b.rot || 0)); return { cx: b.cx + x, cy: b.cy + y, w: wg.w + 2 * g, d: wg.d + 2 * g, rot: b.rot || 0 }; };
+  const parts = (b, g = 0) => [{ cx: b.cx, cy: b.cy, w: b.w + 2 * g, d: b.d + 2 * g, rot: b.rot || 0 }, ...(b.wings || []).map((wg) => wingObj(b, wg, g))];
+  const bRects = (b, g = 0) => parts(b, g).map(corners);
+  function localRects(b) { return [[-b.w / 2, -b.d / 2, b.w / 2, b.d / 2], ...(b.wings || []).map((w) => [w.u - w.w / 2, w.v - w.d / 2, w.u + w.w / 2, w.v + w.d / 2])]; }
+  function bArea(b) {                // area of the union of the block and its wings (coordinate compression)
+    const R = localRects(b);
+    if (R.length === 1) return b.w * b.d;
+    const xs = [...new Set(R.flatMap((r) => [r[0], r[2]]))].sort((a, c) => a - c), ys = [...new Set(R.flatMap((r) => [r[1], r[3]]))].sort((a, c) => a - c);
+    let A = 0;
+    for (let i = 0; i < xs.length - 1; i++) for (let j = 0; j < ys.length - 1; j++) {
+      const mx = (xs[i] + xs[i + 1]) / 2, my = (ys[j] + ys[j + 1]) / 2;
+      if (R.some((r) => mx > r[0] && mx < r[2] && my > r[1] && my < r[3])) A += (xs[i + 1] - xs[i]) * (ys[j + 1] - ys[j]);
+    }
+    return A;
+  }
+  function bBox(b) { const R = localRects(b); return { w: Math.max(...R.map((r) => r[2])) - Math.min(...R.map((r) => r[0])), d: Math.max(...R.map((r) => r[3])) - Math.min(...R.map((r) => r[1])) }; }
+  const anyOverlap = (A, B) => A.some((a) => B.some((b) => satOverlap(a, b)));
   const toWorld = (o, u, v) => { const [x, y] = rot(u, v, rad(o.rot || 0)); return [o.cx + x, o.cy + y]; };
   function inRing(p, r) {
     let c = false;
@@ -71,10 +108,11 @@
     const W = flip ? f.d : f.w, D = flip ? f.w : f.d;
     const F = (u, v) => (flip ? toWorld(f, v, u) : toWorld(f, u, v));
     const rect = (u0, v0, u1, v1) => [F(u0, v0), F(u1, v0), F(u1, v1), F(u0, v1)];
+    const A = f.oneway ? AIS1 : AIS;          // one-way aisles are 20 ft, two-way 24 ft
     const rows = [];
     let v = -D / 2;
-    while (v + 2 * SD + AIS <= D / 2 + 0.01) { rows.push(["s", v, v + SD, "up"], ["a", v + SD, v + SD + AIS], ["s", v + SD + AIS, v + 2 * SD + AIS, "dn"]); v += 2 * SD + AIS; }
-    if (v + SD + AIS <= D / 2 + 0.01) { rows.push(["s", v, v + SD, "up"], ["a", v + SD, v + SD + AIS]); v += SD + AIS; }
+    while (v + 2 * SD + A <= D / 2 + 0.01) { rows.push(["s", v, v + SD, "up"], ["a", v + SD, v + SD + A], ["s", v + SD + A, v + 2 * SD + A, "dn"]); v += 2 * SD + A; }
+    if (v + SD + A <= D / 2 + 0.01) { rows.push(["s", v, v + SD, "up"], ["a", v + SD, v + SD + A]); v += SD + A; }
     const stalls = [], aisles = [], dropped = [];
     const every = f.islands === 0 ? 1e9 : (f.islands || ISL);
     const span = rows.map(() => [Infinity, -Infinity]);          // along-aisle extent of the stalls kept in each row
@@ -90,12 +128,26 @@
       }
     });
     // each aisle runs only as far as the stalls it serves (rows either side), never out over dropped stalls
+    // traffic arrows: two-way = a pair (drive on the right), one-way = one arrow, directions alternating aisle to aisle so traffic circulates
+    const arrows = [];
+    let ai = 0;
     rows.forEach(([k, v0, v1], ri) => {
       if (k !== "a") return;
       const a0 = Math.min(span[ri - 1]?.[0] ?? Infinity, span[ri + 1]?.[0] ?? Infinity), a1 = Math.max(span[ri - 1]?.[1] ?? -Infinity, span[ri + 1]?.[1] ?? -Infinity);
-      if (a1 > a0) aisles.push(rect(a0, v0, a1, v1));
+      if (!(a1 > a0)) return;
+      aisles.push(rect(a0, v0, a1, v1));
+      const vm = (v0 + v1) / 2, len = a1 - a0;
+      const n = Math.max(1, Math.round(len / 70));
+      const sgn = ((ai % 2) ? -1 : 1) * (f.rev ? -1 : 1);
+      for (let i = 0; i < n; i++) {
+        const um = a0 + len * (i + 0.5) / n;
+        const dir = (s_) => { const p0 = F(um, vm), p1 = F(um + s_, vm); return [p1[0] - p0[0], p1[1] - p0[1]]; };
+        if (f.oneway) arrows.push({ at: F(um, vm), dir: dir(sgn), oneway: true });
+        else { arrows.push({ at: F(um - 9, vm - A / 4), dir: dir(1) }); arrows.push({ at: F(um + 9, vm + A / 4), dir: dir(-1) }); }
+      }
+      ai++;
     });
-    return { stalls, aisles, dropped, unused: D / 2 - v };
+    return { stalls, aisles, dropped, arrows, unused: D / 2 - v };
   }
 
   // ---------------------------------------------------------------- editor
@@ -199,7 +251,7 @@
     // ---- derived numbers (recomputed on every change)
     function derive() {
       const blds = S.objs.filter((o) => o.t === "b");
-      const blockers = blds.map((b) => corners(grow(b, WALK)));
+      const blockers = blds.flatMap((b) => bRects(b, WALK));
       let stalls = 0, aisleSF = 0;
       for (const o of S.objs) if (o.t === "p") {
         o._L = fieldLayout(o, pz, blockers);
@@ -207,15 +259,16 @@
         aisleSF += o._L.aisles.length ? o._L.aisles.reduce((s, a) => s + area(a), 0) : 0;
       }
       for (const b of blds) {
-        const c = corners(b);
-        b._bad = !insideAll(c, bz) ? "Outside the building setbacks" : constraints.some((rs) => c.some((p) => inPoly(p, rs)) || polyEdgesCross(c, [rs])) ? "On a constraint" : "";
-        b._over = blds.some((o) => o !== b && satOverlap(c, corners(o)));
+        const R = bRects(b);
+        b._area = bArea(b);
+        b._bad = !R.every((c) => insideAll(c, bz)) ? "Outside the building setbacks" : constraints.some((rs) => R.some((c) => c.some((p) => inPoly(p, rs)) || polyEdgesCross(c, [rs]))) ? "On a constraint" : "";
+        b._over = blds.some((o) => o !== b && anyOverlap(R, bRects(o)));
       }
-      const fp = blds.reduce((s, b) => s + b.w * b.d, 0);
-      const gfa = blds.reduce((s, b) => s + b.w * b.d * (+b.stories || 1), 0);
+      const fp = blds.reduce((s, b) => s + b._area, 0);
+      const gfa = blds.reduce((s, b) => s + b._area * (+b.stories || 1), 0);
       const driveSF = S.objs.filter((o) => o.t === "d").reduce((s, d) => s + plen(d.pts) * (d.width || 24), 0);
       const paveSF = S.objs.filter((o) => o.t === "v").reduce((s, v) => s + area(v.pts), 0);
-      const walkSF = blds.reduce((s, b) => s + 2 * (b.w + b.d) * WALK, 0);
+      const walkSF = blds.reduce((s, b) => s + bRects(b).reduce((t, r) => t + 2 * (Math.hypot(r[1][0] - r[0][0], r[1][1] - r[0][1]) + Math.hypot(r[2][0] - r[1][0], r[2][1] - r[1][1])), 0) * WALK * 0.75, 0);
       const imperv = fp + stalls * SW * SD + aisleSF + driveSF + paveSF + walkSF;
       const pondSF = S.objs.filter((o) => o.t === "o").reduce((s, o) => s + area(o.pts), 0);
       const req = Math.ceil(gfa / 1000 * (+S.ratio || 0));
@@ -229,7 +282,7 @@
         const hits = (polys) => polys.some((rs) => segs.some(([a, b]) => inPoly(a, rs) || inPoly(b, rs) || polyEdgesCross([a, b], [rs])));
         if (hits((base.keep_bldgs || []).flatMap((b) => b.rings))) warn.push("A drive runs through an existing building that stays");
         else if (hits([...(base.wet || []), ...(base.flood || [])])) warn.push("A drive crosses a wetland or flood zone");
-        if (blds.some((b) => segs.some(([a, c]) => inRing(a, corners(b)) || inRing(c, corners(b)) || polyEdgesCross([a, c], [[[...corners(b), corners(b)[0]]]])))) warn.push("A drive runs through a proposed building");
+        if (blds.some((b) => bRects(b).some((r) => segs.some(([a, c]) => inRing(a, r) || inRing(c, r) || polyEdgesCross([a, c], [[[...r, r[0]]]]))))) warn.push("A drive runs through a proposed building");
       }
       const cov = 100 * fp / parcelSF, imp = 100 * imperv / parcelSF, far = gfa / parcelSF;
       if (L.max_lot_coverage_pct && cov > L.max_lot_coverage_pct) warn.push(`Lot coverage ${cov.toFixed(1)}% over the ${L.max_lot_coverage_pct}% maximum`);
@@ -289,6 +342,8 @@
         const d = "M" + o.pts.map(toSvg).join("L");
         out.push(`<path d="${d}" fill="none" stroke="#5d6166" stroke-width="${o.width || 24}" stroke-linejoin="round" stroke-linecap="butt" data-id="${o.id}" class="tf-hit"/>`);
         out.push(`<path d="${d}" fill="none" stroke="#f5f5f0" stroke-width="${0.8 * px}" stroke-dasharray="${8 * px} ${8 * px}" pointer-events="none"/>`);
+        const da = driveArrows(o);
+        if (sc > 0.25 && da.length) out.push(`<path d="${da.map((a) => "M" + arrowPts(a.at, a.dir).map(toSvg).join("L") + "Z").join("")}" fill="#f5f5f0" pointer-events="none"/>`);
       }
       // parking
       for (const o of S.objs.filter((o) => o.t === "p")) {
@@ -296,16 +351,19 @@
         out.push(`<path d="${pathOf([[...corners(o), corners(o)[0]]])}" fill="rgba(93,97,102,0.18)" stroke="${S.sel === o.id ? "var(--mint)" : "rgba(255,255,255,0.35)"}" stroke-width="${px}" stroke-dasharray="${4 * px} ${3 * px}" data-id="${o.id}" class="tf-hit"/>`);
         out.push(`<path d="${L.aisles.map((a) => "M" + a.map(toSvg).join("L") + "Z").join("")}" fill="#5d6166" pointer-events="none"/>`);
         out.push(`<path d="${L.stalls.map((a) => "M" + a.map(toSvg).join("L") + "Z").join("")}" fill="#6b7076" stroke="#f5f5f0" stroke-width="${Math.max(0.3, 0.7 * px)}" pointer-events="none"/>`);
+        if (sc > 0.25 && L.arrows.length) out.push(`<path d="${L.arrows.map((a) => "M" + arrowPts(a.at, a.dir).map(toSvg).join("L") + "Z").join("")}" fill="#f5f5f0" pointer-events="none"/>`);
         if (L.dropped.length && sc > 0.6) out.push(`<path d="${L.dropped.map((a) => "M" + a.map(toSvg).join("L") + "Z").join("")}" fill="none" stroke="rgba(196,53,43,0.45)" stroke-width="${0.6 * px}" pointer-events="none"/>`);
       }
       // buildings
       for (const b of S.objs.filter((o) => o.t === "b")) {
-        const c = corners(b), cw = corners(grow(b, WALK));
-        out.push(`<path d="${pathOf([[...cw, cw[0]]])}" fill="rgba(225,225,220,0.75)" stroke="none" pointer-events="none"/>`);
+        const R = bRects(b), RW = bRects(b, WALK);
+        const dR = R.map((c) => "M" + [...c, c[0]].map(toSvg).join("L") + "Z").join("");
+        out.push(`<path d="${RW.map((c) => "M" + [...c, c[0]].map(toSvg).join("L") + "Z").join("")}" fill="rgba(225,225,220,0.75)" stroke="none" pointer-events="none"/>`);
         const bad = b._bad || b._over;
-        out.push(`<path d="${pathOf([[...c, c[0]]])}" fill="${bad ? "#e9b4ae" : "#d8dde6"}" stroke="${bad ? "#c4352b" : "#30363d"}" stroke-width="${1.4 * px}" data-id="${b.id}" class="tf-hit"/>`);
+        out.push(`<path d="${dR}" fill="none" stroke="${bad ? "#c4352b" : "#30363d"}" stroke-width="${2.8 * px}" pointer-events="none"/>`);
+        out.push(`<path d="${dR}" fill="${bad ? "#e9b4ae" : "#d8dde6"}" fill-rule="nonzero" stroke="none" data-id="${b.id}" class="tf-hit"/>`);
         if (b.w * sc > 46) {
-          const t = [b.name, `${num(b.w * b.d)} SF${(+b.stories || 1) > 1 ? ` × ${b.stories}` : ""}`];
+          const t = [b.name, `${num(b._area ?? bArea(b))} SF${(+b.stories || 1) > 1 ? ` × ${b.stories}` : ""}`];
           out.push(`<text x="${R2(b.cx)}" y="${R2(-b.cy)}" font-size="${fs}" text-anchor="middle" class="tf-lbl" pointer-events="none">${t.map((s, i) => `<tspan x="${R2(b.cx)}" dy="${i ? 1.25 * fs : -0.2 * fs}">${esc(s)}</tspan>`).join("")}</text>`);
         }
       }
@@ -334,6 +392,12 @@
           out.push(`<line x1="${mid[0]}" y1="${-mid[1]}" x2="${top[0]}" y2="${-top[1]}" stroke="var(--mint)" stroke-width="${px}"/>`);
           out.push(`<circle cx="${top[0]}" cy="${-top[1]}" r="${h * 0.6}" class="tf-h" data-h="rot"/>`);
           out.push(`<path d="${pathOf([[...corners(o), corners(o)[0]]])}" fill="none" stroke="var(--mint)" stroke-width="${1.6 * px}" pointer-events="none"/>`);
+          if (o.t === "b") (o.wings || []).forEach((wg, j) => {
+            const W = wingObj(o, wg), cs = corners(W);
+            out.push(`<path d="${pathOf([[...cs, cs[0]]])}" fill="none" stroke="var(--violet)" stroke-width="${1.4 * px}" stroke-dasharray="${5 * px} ${3 * px}" pointer-events="none"/>`);
+            cs.forEach((p, i) => out.push(`<rect x="${p[0] - h / 2}" y="${-p[1] - h / 2}" width="${h}" height="${h}" class="tf-h tf-hw" data-h="w${j}c${i}"/>`));
+            out.push(`<circle cx="${W.cx}" cy="${-W.cy}" r="${h * 0.75}" class="tf-h tf-hw" data-h="w${j}m"><title>Drag to move the wing</title></circle>`);
+          });
         } else {
           o.pts.forEach((p, i) => out.push(`<rect x="${p[0] - h / 2}" y="${-p[1] - h / 2}" width="${h}" height="${h}" class="tf-h" data-h="v${i}"/>`));
         }
@@ -359,16 +423,30 @@
         ${field("Name", "name", o.name, "text")}${field("Use", "use", o.use || "", "text")}
         <div class="tf-g2">${field("Width ft", "w", R2(o.w))}${field("Depth ft", "d", R2(o.d))}</div>
         <div class="tf-g2">${field("Stories", "stories", o.stories || 1, "number", 'min="1" step="1"')}${field("Rotation°", "rot", R2(o.rot || 0))}</div>
-        ${field("Footprint SF (keeps depth)", "fp", Math.round(o.w * o.d))}
-        <div class="tf-kv"><span>GFA</span><b>${num(o.w * o.d * (+o.stories || 1))} SF</b></div>
+        ${field((o.wings || []).length ? "Main block SF (keeps depth)" : "Footprint SF (keeps depth)", "fp", Math.round(o.w * o.d))}
+        <div class="tf-kv"><span>Footprint</span><b>${num(bArea(o))} SF</b></div>
+        <div class="tf-kv"><span>GFA</span><b>${num(bArea(o) * (+o.stories || 1))} SF</b></div>
+        <div class="tf-kv"><span>Overall</span><b>${num(bBox(o).w)}' × ${num(bBox(o).d)}'</b></div>
+        <h4>Shape</h4>
+        <div class="row" style="gap:5px;flex-wrap:wrap">
+          <button class="btn sm" data-tf="shape" data-s="rect">Rectangle</button><button class="btn sm" data-tf="shape" data-s="L">L</button>
+          <button class="btn sm" data-tf="shape" data-s="T">T</button><button class="btn sm" data-tf="shape" data-s="U">U</button>
+          <button class="btn sm" data-tf="shape" data-s="Z">Step</button><button class="btn sm" data-tf="addwing">+ Wing</button>
+        </div>
+        ${(o.wings || []).map((wg, j) => `<div class="tf-wing"><span>Wing ${j + 1}</span>
+          <input class="tf-in" data-wk="${j}:w" type="number" value="${R2(wg.w)}" title="Width ft">×<input class="tf-in" data-wk="${j}:d" type="number" value="${R2(wg.d)}" title="Depth ft">
+          <button class="btn sm" data-tf="rmwing" data-j="${j}" title="Remove wing">×</button></div>`).join("")}
+        <div class="tf-note">Wings are extra blocks on the building's own grid (90° corners). Drag a wing's dot to move it (it snaps flush to the main block), its violet corners to size it.</div>
         ${o._bad || o._over ? `<div class="tf-warn">${esc(o._bad || "Overlaps another building")}</div>` : ""}`;
       else if (o?.t === "p") sel = `<h4>Parking field</h4>
         <div class="tf-g2">${field("Length ft", "w", R2(o.w))}${field("Width ft", "d", R2(o.d))}</div>
         <div class="tf-g2">${field("Rotation°", "rot", R2(o.rot || 0))}${field("Island every", "islands", o.islands ?? ISL, "number", 'min="0" step="1"')}</div>
         <div class="row" style="gap:6px;margin:6px 0"><button class="btn sm" data-tf="flip">Flip aisles</button><button class="btn sm" data-tf="fitfield">Trim to stalls</button></div>
+        <label class="tf-chk"><input type="checkbox" data-fk="oneway" ${o.oneway ? "checked" : ""}> One-way aisles (20 ft)</label>
+        ${o.oneway ? `<button class="btn sm" data-tf="revflow">Reverse traffic flow</button>` : ""}
         <div class="tf-kv"><span>Stalls</span><b>${o._L.stalls.length}</b></div>
         <div class="tf-kv"><span>Lost to setbacks / buildings</span><b>${o._L.dropped.length}</b></div>
-        <div class="tf-note">90° stalls 9' × 18', 24' two-way aisles${o._L.unused > 1 ? `, ${Math.round(o._L.unused)}' unused across the field` : ""}.</div>`;
+        <div class="tf-note">90° stalls 9' × 18', ${o.oneway ? "20' one-way aisles alternating direction so traffic circulates" : "24' two-way aisles"}${o._L.unused > 1 ? `, ${Math.round(o._L.unused)}' unused across the field` : ""}.</div>`;
       else if (o?.t === "d") sel = `<h4>Drive</h4>${field("Width ft", "width", o.width || 24)}
         <div class="tf-kv"><span>Length</span><b>${num(plen(o.pts))} ft</b></div><div class="tf-note">Double-click a segment to add a bend; Alt-click a point to remove it.</div>`;
       else if (o?.t === "o") sel = `<h4>Pond</h4><div class="tf-kv"><span>Area</span><b>${num(area(o.pts))} SF</b></div><div class="tf-note">Drag the corners to shape it. Double-click an edge to add a corner.</div>`;
@@ -409,7 +487,7 @@
     }
 
     // ---- history
-    const snapshot = () => JSON.stringify({ objs: S.objs.map(({ _L, _bad, _over, ...o }) => o), ratio: S.ratio, autoPond: S.autoPond });
+    const snapshot = () => JSON.stringify({ objs: S.objs.map(({ _L, _bad, _over, _area, ...o }) => o), ratio: S.ratio, autoPond: S.autoPond });
     function commit() { S.hist.push(S._before ?? snapshot()); if (S.hist.length > 200) S.hist.shift(); S.fut = []; S._before = null; S.dirty = true; persistLocal(); }
     function begin() { S._before = snapshot(); }
     function restore(js) { const v = JSON.parse(js); S.objs = v.objs; S.ratio = v.ratio; S.autoPond = v.autoPond; S._forcePanel = true; redraw(); }
@@ -426,17 +504,20 @@
     // ---- output
     function design() {
       const blds = S.objs.filter((o) => o.t === "b");
-      const blockers = blds.map((b) => corners(grow(b, WALK)));
+      const blockers = blds.flatMap((b) => bRects(b, WALK));
       const r1 = (p) => [R2(p[0]), R2(p[1])];
       return {
         frame: base.frame, parking_ratio: +S.ratio, auto_pond: !!S.autoPond,
-        buildings: blds.map((b) => ({ name: b.name, use: b.use, label: b.label, stories: +b.stories || 1, drive_thru: !!b.drive_thru, cx: R2(b.cx), cy: R2(b.cy), w: R2(b.w), d: R2(b.d), rot: R2(b.rot || 0) })),
+        buildings: blds.map((b) => ({ name: b.name, use: b.use, label: b.label, stories: +b.stories || 1, drive_thru: !!b.drive_thru, cx: R2(b.cx), cy: R2(b.cy), w: R2(b.w), d: R2(b.d), rot: R2(b.rot || 0),
+          wings: (b.wings || []).map((wg) => ({ u: R2(wg.u), v: R2(wg.v), w: R2(wg.w), d: R2(wg.d) })) })),
         parking: S.objs.filter((o) => o.t === "p").map((f) => {
           const L = fieldLayout(f, pz, blockers);
-          return { params: { cx: R2(f.cx), cy: R2(f.cy), w: R2(f.w), d: R2(f.d), rot: R2(f.rot || 0), flip: !!f.flip, islands: f.islands ?? ISL },
-            stalls: L.stalls.map((s) => s.map(r1)), aisles: L.aisles.map((s) => s.map(r1)) };
+          return { params: { cx: R2(f.cx), cy: R2(f.cy), w: R2(f.w), d: R2(f.d), rot: R2(f.rot || 0), flip: !!f.flip, islands: f.islands ?? ISL, oneway: !!f.oneway, rev: !!f.rev },
+            stalls: L.stalls.map((s) => s.map(r1)), aisles: L.aisles.map((s) => s.map(r1)),
+            arrows: L.arrows.map((a) => ({ at: r1(a.at), dir: [+a.dir[0].toFixed(4), +a.dir[1].toFixed(4)], oneway: !!a.oneway })) };
         }),
-        drives: S.objs.filter((o) => o.t === "d").map((d) => ({ width: +d.width || 24, pts: d.pts.map(r1) })),
+        drives: S.objs.filter((o) => o.t === "d").map((d) => ({ width: +d.width || 24, pts: d.pts.map(r1),
+          arrows: driveArrows(d).map((a) => ({ at: r1(a.at), dir: [+a.dir[0].toFixed(4), +a.dir[1].toFixed(4)] })) })),
         ponds: S.objs.filter((o) => o.t === "o").map((o) => ({ pts: o.pts.map(r1) })),
         pavement: S.objs.filter((o) => o.t === "v").map((o) => ({ pts: o.pts.map(r1) })),
         totals: { stalls: S.D?.stalls, required: S.D?.req, gfa: Math.round(S.D?.gfa || 0) },
@@ -472,7 +553,8 @@
       const order = ["b", "d", "p", "v", "o"];
       for (const t of order) for (const o of [...S.objs].reverse()) {
         if (o.t !== t) continue;
-        if ((t === "b" || t === "p") && inRing(p, corners(o))) return o;
+        if (t === "b" && bRects(o).some((r) => inRing(p, r))) return o;
+        if (t === "p" && inRing(p, corners(o))) return o;
         if ((t === "o" || t === "v") && inRing(p, o.pts)) return o;
         if (t === "d") for (let i = 1; i < o.pts.length; i++) if (distSeg(p, o.pts[i - 1], o.pts[i]) <= (o.width || 24) / 2) return o;
       }
@@ -489,9 +571,15 @@
       if (h && o) {
         begin();
         if (h === "rot") drag = { k: "rot", o };
+        else if (h[0] === "w") {
+          const j = parseInt(h.slice(1), 10), wg = o.wings[j];
+          if (h.endsWith("m")) drag = { k: "wmove", o, j, p0: toLocal(o, p), orig: { ...wg } };
+          else { const i = +h.slice(h.indexOf("c") + 1); const R = [wg.u - wg.w / 2, wg.v - wg.d / 2, wg.u + wg.w / 2, wg.v + wg.d / 2];
+            const cl = [[R[0], R[1]], [R[2], R[1]], [R[2], R[3]], [R[0], R[3]]]; drag = { k: "wresize", o, j, opp: cl[(i + 2) % 4] }; }
+        }
         else if (h[0] === "c") {
           const i = +h.slice(1), opp = corners(o)[(i + 2) % 4];
-          drag = { k: "resize", o, opp };
+          drag = { k: "resize", o, opp, c0: [o.cx, o.cy], wings0: JSON.parse(JSON.stringify(o.wings || [])) };
         } else if (h[0] === "v") {
           const i = +h.slice(1);
           if (e.altKey && o.pts.length > (o.t === "d" ? 2 : 3)) { o.pts.splice(i, 1); commit(); redraw(); drag = null; return; }
@@ -532,6 +620,24 @@
         const w = Math.max(10, Math.abs(snap(u, e))), d = Math.max(10, Math.abs(snap(v, e)));
         const [mx, my] = rot(Math.sign(u || 1) * w / 2, Math.sign(v || 1) * d / 2, rad(o.rot || 0));
         o.w = w; o.d = d; o.cx = drag.opp[0] + mx; o.cy = drag.opp[1] + my;
+        if (o.wings?.length) {          // wings stay where they are on the ground while the main block changes size
+          const [du, dv] = rot(o.cx - drag.c0[0], o.cy - drag.c0[1], -rad(o.rot || 0));
+          o.wings = drag.wings0.map((wg) => ({ ...wg, u: wg.u - du, v: wg.v - dv }));
+        }
+      } else if (drag.k === "wmove") {
+        const q = toLocal(o, p), wg = o.wings[drag.j];
+        let u = snap(drag.orig.u + q[0] - drag.p0[0], e), v = snap(drag.orig.v + q[1] - drag.p0[1], e);
+        // snap the wing flush to the main block's edges
+        const sn = 4;
+        const L0 = -o.w / 2, R0 = o.w / 2, B0 = -o.d / 2, T0 = o.d / 2;
+        for (const [edge, val] of [[u - wg.w / 2, R0], [u + wg.w / 2, L0], [u - wg.w / 2, L0], [u + wg.w / 2, R0]]) if (Math.abs(edge - val) < sn) { u += val - edge; break; }
+        for (const [edge, val] of [[v - wg.d / 2, T0], [v + wg.d / 2, B0], [v - wg.d / 2, B0], [v + wg.d / 2, T0]]) if (Math.abs(edge - val) < sn) { v += val - edge; break; }
+        wg.u = u; wg.v = v;
+      } else if (drag.k === "wresize") {
+        const q = toLocal(o, p), wg = o.wings[drag.j];
+        const x = snap(q[0], e), y = snap(q[1], e), [ox, oy] = drag.opp;
+        const w = Math.max(8, Math.abs(x - ox)), d = Math.max(8, Math.abs(y - oy));
+        wg.w = w; wg.d = d; wg.u = ox + Math.sign(x - ox || 1) * w / 2; wg.v = oy + Math.sign(y - oy || 1) * d / 2;
       } else if (drag.k === "vert") {
         o.pts[drag.i] = [snap(p[0], e), snap(p[1], e)];
       }
@@ -555,7 +661,7 @@
         }
         return;
       }
-      if (["move", "rot", "resize", "vert"].includes(d.k)) {
+      if (["move", "rot", "resize", "vert", "wmove", "wresize"].includes(d.k)) {
         if (S._before && S._before !== snapshot()) commit(); else S._before = null;
         S._forcePanel = true; redraw();
       }
@@ -637,7 +743,28 @@
       else if (a === "close") close();
       else if (a === "fit") { fit(); redraw(); }
       else if (a === "place") placeProgram(+t.dataset.i);
-      else if (a === "flip" && o) { begin(); o.flip = !o.flip; commit(); S._forcePanel = true; redraw(); }
+      else if (a === "shape" && o?.t === "b") {
+        begin();
+        const area0 = bArea(o), W = o.w, D = o.d, s_ = t.dataset.s;
+        // presets keep about the same footprint: the main block gives up what the wings add
+        if (s_ === "rect") { o.wings = []; o.w = R2(area0 / D); }
+        else if (s_ === "L") { const ww = R2(W * 0.38), wd = R2(D * 0.9); o.wings = [{ u: R2(-W / 2 + ww / 2), v: R2(-D / 2 - wd / 2), w: ww, d: wd }]; }
+        else if (s_ === "T") { const ww = R2(W * 0.34), wd = R2(D * 0.9); o.wings = [{ u: 0, v: R2(-D / 2 - wd / 2), w: ww, d: wd }]; }
+        else if (s_ === "U") { const ww = R2(W * 0.26), wd = R2(D * 0.9); o.wings = [{ u: R2(-W / 2 + ww / 2), v: R2(-D / 2 - wd / 2), w: ww, d: wd }, { u: R2(W / 2 - ww / 2), v: R2(-D / 2 - wd / 2), w: ww, d: wd }]; }
+        else if (s_ === "Z") { const ww = R2(W * 0.5), wd = R2(D * 0.6); o.wings = [{ u: R2(W / 2 - ww / 2 + W * 0.25), v: R2(-D / 2 - wd / 2 + D * 0.0), w: ww, d: wd }]; }
+        if (s_ !== "rect" && area0 > 0) { const k = Math.sqrt(area0 / bArea(o)); o.w = R2(o.w * k); o.d = R2(o.d * k); o.wings = o.wings.map((wg) => ({ u: R2(wg.u * k), v: R2(wg.v * k), w: R2(wg.w * k), d: R2(wg.d * k) })); }
+        commit(); S._forcePanel = true; redraw();
+      } else if (a === "addwing" && o?.t === "b") {
+        begin(); o.wings = o.wings || [];
+        const n = o.wings.length, side = [[0, -1], [1, 0], [0, 1], [-1, 0]][n % 4];
+        const ww = R2(side[0] ? o.d * 0.6 : o.w * 0.35), wd = R2(side[0] ? o.w * 0.3 : o.d * 0.7);
+        const [w_, d_] = side[0] ? [wd, ww] : [ww, wd];
+        o.wings.push({ u: R2(side[0] * (o.w / 2 + w_ / 2)), v: R2(side[1] * (o.d / 2 + d_ / 2)), w: w_, d: d_ });
+        commit(); S._forcePanel = true; redraw();
+      } else if (a === "rmwing" && o?.t === "b") {
+        begin(); o.wings.splice(+t.dataset.j, 1); commit(); S._forcePanel = true; redraw();
+      } else if (a === "revflow" && o) { begin(); o.rev = !o.rev; commit(); S._forcePanel = true; redraw();
+      } else if (a === "flip" && o) { begin(); o.flip = !o.flip; commit(); S._forcePanel = true; redraw(); }
       else if (a === "fitfield" && o?.t === "p") {          // shrink the field to the stalls it actually holds
         const L = o._L; if (!L.stalls.length) return;
         begin();
@@ -662,6 +789,12 @@
       if (t.dataset.l) { S.layers[t.dataset.l] = t.checked; redraw(); return; }
       if (t.dataset.g) { begin(); S[t.dataset.g] = t.type === "checkbox" ? t.checked : +t.value; commit(); S._forcePanel = true; redraw(); return; }
       const o = S.objs.find((x) => x.id === S.sel);
+      if (o && t.dataset.fk) { begin(); o[t.dataset.fk] = t.checked; commit(); S._forcePanel = true; redraw(); return; }
+      if (o && t.dataset.wk) {
+        const [j, key] = t.dataset.wk.split(":"); const wg = o.wings[+j];
+        if (wg && +t.value > 0) { begin(); wg[key] = +t.value; commit(); S._forcePanel = true; redraw(); }
+        return;
+      }
       if (!o || !t.dataset.k) return;
       begin();
       const k = t.dataset.k, v = t.type === "number" ? +t.value : t.value;

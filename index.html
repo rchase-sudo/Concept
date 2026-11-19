@@ -212,6 +212,8 @@
   .tf-lbl { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-weight: 600; fill: #12181c; paint-order: stroke; stroke: rgba(255,255,255,.85); stroke-width: 3px; stroke-linejoin: round; }
   .tf-lbl-p { fill: #fff; stroke: rgba(0,0,0,.55); }
   .tf-road { fill: #1d2327; letter-spacing: .08em; }
+  .tf-hw { stroke: var(--violet); }
+  .tf-wing { display: flex; align-items: center; gap: 5px; padding: 4px 0; font-size: 12px; } .tf-wing span { flex: 1; color: var(--soft); } .tf-wing .tf-in { width: 56px; }
   .tf-north { position: absolute; right: 16px; top: 14px; width: 30px; display: flex; flex-direction: column; align-items: center; color: var(--text); pointer-events: none; }
   .tf-north b { font-family: 'Sora', system-ui, sans-serif; font-size: 11px; }
   .tf-hint { position: absolute; left: 12px; bottom: 10px; right: 160px; font-size: 11.5px; color: var(--soft); background: color-mix(in srgb, var(--surface) 88%, transparent); border: 1px solid var(--line); border-radius: 4px; padding: 6px 9px; pointer-events: none; }
@@ -230,7 +232,7 @@
   .tf-kv.tf-over b { color: var(--red); }
   .tf-in { width: 62px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); color: var(--text); font: inherit; }
   .tf-f { display: flex; flex-direction: column; gap: 3px; margin: 6px 0; font-size: 11.5px; color: var(--soft); }
-  .tf-f input { padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); color: var(--text); font: inherit; font-size: 13px; }
+  .tf-f input { width: 100%; min-width: 0; box-sizing: border-box; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); color: var(--text); font: inherit; font-size: 13px; }
   .tf-g2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .tf-chk { display: flex; gap: 7px; align-items: center; margin: 6px 0; font-size: 12.5px; cursor: pointer; }
   .tf-warns { margin: 10px 0; border: 1px solid var(--red); border-left-width: 3px; border-radius: 6px; padding: 7px 10px; color: var(--red); background: color-mix(in srgb, var(--red) 7%, transparent); font-size: 12px; }
@@ -254,7 +256,7 @@ const SUPABASE_URL = "https://mmaqwemqbxwngqxtnsug.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1tYXF3ZW1xYnh3bmdxeHRuc3VnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NDY1MjgsImV4cCI6MjA5ODMyMjUyOH0.UrC1-5gGNODzu1PHU1QEqZAfzYhDbpQDlK3ruaIUDj0";
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 </script>
-<script src="testfit.js?v=1"></script>
+<script src="testfit.js?v=2"></script>
 <script src="app.js?v=1792783933"></script>
 </body>
 </html>
