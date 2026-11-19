@@ -163,7 +163,7 @@
     const j = state.job;
     if (j && state.tfWaitOpen === j.id && j.summary?.testfit_status === "ready" && j.files?.testfit?.["base.json"]) { state.tfWaitOpen = null; setTimeout(openTestFit, 0); }
     const renderPending = j && j.status === "layout_approved" && ["queued", "modeling", "rendering", "nanobanana", "compositing"].includes(j.render_status);
-    const pkgPending = j && (["queued", "researching", "writing", "typesetting"].includes(j.package_status) || ["queued", "designing"].includes(j.design_status) || ["queued", "building"].includes(j.summary?.preview?.status) || j.summary?.testfit_status === "building");
+    const pkgPending = j && (["queued", "researching", "writing", "typesetting"].includes(j.package_status) || ["queued", "designing"].includes(j.design_status) || ["queued", "building"].includes(j.summary?.preview?.status) || j.summary?.testfit_status === "building" || j.design?.c3d_status === "building");
     if (state.view === "job" && j && (WORKING.has(j.status) || renderPending || pkgPending)) pollTimer = setTimeout(() => refreshJob(), renderPending || pkgPending ? 6000 : 4000);
   }
 
@@ -287,7 +287,7 @@
       root.innerHTML = `
         <header class="topbar">
           <div class="brand"><span class="mark"></span> Drafted <small>Concept plans</small></div>
-          <div class="topbar-right"><span>${esc(state.session.user.email)}</span><button class="btn sm ghost" data-a="signout">Sign out</button></div>
+          <div class="topbar-right"><button class="btn sm ghost" data-a="cad">Civil 3D template</button><span>${esc(state.session.user.email)}</span><button class="btn sm ghost" data-a="signout">Sign out</button></div>
         </header>
         <div class="shell"><aside class="side" id="side"></aside><main id="main"></main></div>`;
     }
@@ -320,6 +320,7 @@
     if (map) { try { map.off(); map.remove(); } catch (_) {} map = null; }
     if (state.view === "new") { main.innerHTML = viewNew(); bindNew(main); return; }
     if (state.view === "batch") { main.innerHTML = viewBatch(); return; }
+    if (state.view === "cad") { main.innerHTML = viewCad(); bindCad(main); return; }
     const j = state.job;
     if (!j) {
       main.innerHTML = state.error
@@ -329,6 +330,150 @@
     }
     main.innerHTML = viewJob(j);
     bindJob(main, j);
+  }
+
+
+  // ------------------------------------------------------------- Civil 3D template (account level)
+  // The firm's .dwt / .dwg / .dxf (or the DRAFTEDSTANDARDS .json from the Civil 3D plugin): its layers are matched to Drafted's,
+  // and every plan set's Civil 3D package (DXF linework + the plugin's import) comes out on those layers.
+  const C3D_ROLES = [
+    ["V-PROP-LINE", "Property line", "PROP BNDY BOUNDARY PL LOT PARCEL", 1], ["V-PROP-SBCK", "Setback lines", "SBCK SETBACK SETB BSL ESMT", 1],
+    ["V-TOPO-MINR", "Existing minor contours", "TOPO CONT MINR MINOR", 1], ["V-TOPO-MAJR", "Existing major contours", "TOPO CONT MAJR MAJOR INDX", 1],
+    ["V-TOPO-TEXT", "Existing contour labels", "TOPO CONT TEXT LABL ANNO", 1], ["V-ROAD-EDGE", "Existing road edge", "ROAD EOP PVMT EDGE CURB", 1],
+    ["V-BLDG", "Existing buildings", "BLDG BUILDING STRC", 1], ["V-TOPO", "Existing surface (EG)", "SURF TOPO EG EXIST TIN", 1],
+    ["C-TOPO", "Proposed surface (FG)", "SURF TOPO FG FINISH GRAD TIN", 0], ["C-TOPO-MINR", "Proposed minor contours", "TOPO CONT GRAD MINR MINOR", 0],
+    ["C-TOPO-MAJR", "Proposed major contours", "TOPO CONT GRAD MAJR MAJOR INDX", 0], ["C-TOPO-TEXT", "Proposed contour labels", "TOPO CONT GRAD TEXT LABL ANNO", 0],
+    ["C-TOPO-SPOT", "Spot grades / COGO points", "SPOT ELEV POINT PNTS COGO GRAD", 0], ["C-GRAD-FEAT", "Grading feature lines", "FEAT FTLN GRAD BRKL BREAK", 0],
+    ["C-BLDG", "Proposed buildings", "BLDG BUILDING STRC FTPT", 0], ["C-PVMT-EDGE", "Pavement edge / curb", "PVMT PAVE CURB EOP EDGE ASPH", 0],
+    ["C-PKNG-STRP", "Parking striping", "STRP STRIPE PKNG PARK PAINT MRKG", 0], ["C-WALK", "Sidewalks", "WALK SDWK SIDEWALK CONC", 0],
+    ["C-ROAD-CNTR", "Drive centerline (alignment)", "CNTR CL CENTER ALIGN ALGN", 0], ["C-ROAD-STAN", "Stationing text", "STAN STA STATION ALIGN", 0],
+    ["C-STRM-PIPE", "Storm pipes", "STRM STORM SD DRAN DRAIN PIPE", 0], ["C-STRM-STRC", "Storm structures", "STRM STORM SD DRAN STRC STRUCT CB MH", 0],
+    ["C-STRM-TEXT", "Storm labels", "STRM STORM SD TEXT LABL ANNO", 0], ["C-STRM-POND", "Detention pond", "POND BASN BASIN DETN SWM STRM", 0],
+    ["C-SSWR-PIPE", "Sanitary pipes", "SSWR SAN SANI SEWR SEWER SS PIPE", 0], ["C-SSWR-FMAN", "Force main (polyline)", "FMAN FM FORCE SSWR SAN", 0],
+    ["C-SSWR-STRC", "Sanitary manholes", "SSWR SAN SEWR STRC MH SMH", 0], ["C-SSWR-TEXT", "Sanitary labels", "SSWR SAN SEWR TEXT LABL ANNO", 0],
+    ["C-SSWR-LATL", "Sanitary laterals", "LATL LAT SERV SVC SSWR SAN", 0], ["C-WATR-PIPE", "Water main (polyline)", "WATR WATER WTR WM DOM", 0],
+    ["C-WATR-LATL", "Water services", "WATR WATER WTR LATL SERV SVC", 0], ["C-WATR-STRC", "Hydrants and valves", "WATR WATER HYDR HYD VALV VALVE FH", 0],
+    ["C-POWR-UGND", "Underground electric", "POWR ELEC ELECTRIC UGND UE", 0], ["C-NGAS-UGND", "Gas", "NGAS GAS", 0],
+    ["C-EROS-LOD", "Limit of disturbance", "LOD LIMIT DIST EROS ESC", 0], ["C-EROS-SILT", "Silt fence", "SILT SF EROS ESC FENC", 0],
+  ];
+  const C3D_GENERIC = new Set("PIPE TEXT LABL ANNO STRC STRUCT EDGE LAT LATL SERV SVC CONC ELEV POINT MH SD SS SF CL PL FM UE FH".split(" "));
+  const toks = (n) => String(n).toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
+  function c3dAutoMap(layers) {
+    const names = layers.map((l) => l.name), out = {};
+    for (const [std, , w, existing] of C3D_ROLES) {
+      const exact = names.find((n) => n.toUpperCase() === std); if (exact) { out[std] = exact; continue; }
+      const words = w.split(" "), sw = new Set(toks(std)); let best = null, bs = 0;
+      for (const n of names) {
+        const ts = toks(n), set = new Set(ts);
+        if (!words.filter((x) => !C3D_GENERIC.has(x)).some((x) => set.has(x) || (x.length > 2 && ts.some((t) => t.includes(x))))) continue;
+        let s = words.reduce((a, x) => a + (set.has(x) ? 2 : 0) + (x.length > 2 && ts.some((t) => t !== x && t.includes(x)) ? 0.5 : 0), 0) + 0.5 * ts.filter((t) => sw.has(t)).length;
+        const ex = /^(EX|EXIST|EXST|V-|EXT)/i.test(n) || /EXIST/i.test(n);
+        s += existing ? (ex ? 1.5 : -1) : (ex ? -2.5 : 0);
+        if (s > bs) { bs = s; best = n; }
+      }
+      if (best && bs >= 2) out[std] = best;
+    }
+    return out;
+  }
+  async function readDxfLayers(file) {
+    const head = await file.slice(0, 22).text();
+    if (/AutoCAD Binary DXF/i.test(head)) throw new Error("That is a binary DXF. Save it as an ASCII DXF, or upload the .dwt and run DRAFTEDSTANDARDS in Civil 3D.");
+    const text = await file.slice(0, 40e6).text();
+    const lines = text.split(/\r?\n/);
+    const layers = []; let inLayer = false, cur = null;
+    for (let i = 0; i + 1 < lines.length; i += 2) {
+      const code = lines[i].trim(), val = lines[i + 1].trim();
+      if (code === "0" && val === "TABLE" && lines[i + 2]?.trim() === "2" && lines[i + 3]?.trim() === "LAYER") { inLayer = true; continue; }
+      if (!inLayer) { if (code === "0" && val === "ENTITIES") break; continue; }
+      if (code === "0") { if (cur?.name) layers.push(cur); cur = val === "LAYER" ? { name: "", color: 7, linetype: "" } : null; if (val === "ENDTAB") break; continue; }
+      if (!cur) continue;
+      if (code === "2") cur.name = val; else if (code === "62") cur.color = Math.abs(+val) || 7; else if (code === "6") cur.linetype = val;
+    }
+    if (cur?.name) layers.push(cur);
+    return layers.filter((l) => !l.name.includes("|"));
+  }
+  async function loadCadTemplate() {
+    try { const r = await api({ action: "cad_template_get" }); state.cad = { tpl: r.template, url: r.file_url }; }
+    catch (e) { state.cad = { tpl: null, error: e.message }; }
+    if (state.view === "cad") renderMain();
+  }
+  function viewCad() {
+    const C = state.cad;
+    if (!C) { loadCadTemplate(); return `<div class="card working"><div class="spin"></div><div><div class="w1">Loading…</div></div></div>`; }
+    const t = C.tpl || {}, layers = t.layers || [], map = { ...(t.mapping || {}) };
+    const opts = (sel) => `<option value="">(Drafted layer)</option>` + layers.map((l) => `<option${l.name === sel ? " selected" : ""}>${esc(l.name)}</option>`).join("");
+    return `
+      <div class="eyebrow">Account</div>
+      <h1 class="title">Civil 3D template</h1>
+      <p class="sub">Your firm's template sets the layers every plan set's CAD export uses. In Civil 3D, the Drafted plugin builds the design as native objects (surfaces, storm and sanitary pipe networks on your parts lists, ponds, feature lines, alignment and profiles, COGO points) with your template's styles.</p>
+      ${C.error ? `<div class="err-box">${esc(C.error)}</div>` : ""}${state.cadMsg ? `<div class="note" style="margin-bottom:10px">${esc(state.cadMsg)}</div>` : ""}
+      <div class="card" style="padding:14px 16px;margin-bottom:16px">
+        <div class="row"><div><h3 style="margin:0">Template file</h3>
+          <div class="note">${t.file_name ? `${esc(t.file_name)} · ${layers.length} layers${t.updated_at ? " · updated " + esc(new Date(t.updated_at).toLocaleDateString()) : ""}` : "None yet."}
+          Upload a <b>.dxf</b> of your template (Save As DXF) or the <b>.json</b> from the plugin's DRAFTEDSTANDARDS command to read its layers. A <b>.dwt</b> / <b>.dwg</b> is kept for reference; the plugin matches layers itself when you import.</div></div>
+          <span class="spacer"></span>
+          ${C.url ? `<a class="btn sm" href="${C.url}" target="_blank" rel="noopener">Download</a>` : ""}
+          ${t.file_name ? `<button class="btn sm ghost" data-a="caddelete" ${state.busy ? "disabled" : ""}>Remove</button>` : ""}
+          <label class="btn primary sm" style="cursor:pointer">${state.busy ? "Uploading…" : t.file_name ? "Replace" : "Upload template"}<input type="file" id="cadFile" accept=".dwt,.dwg,.dxf,.json" style="display:none"></label></div>
+      </div>
+      ${layers.length ? `<div class="card" style="padding:14px 16px;margin-bottom:16px">
+        <div class="row"><div><h3 style="margin:0">Layer matching</h3><div class="note">Drafted's layer on the left, yours on the right. Unmatched layers keep Drafted's name. Exports built after you save use these; use “Rebuild Civil 3D package” on a plan set to update an existing one.</div></div>
+          <span class="spacer"></span><button class="btn sm ghost" data-a="cadauto">Auto-match again</button><button class="btn primary sm" data-a="cadsave" ${state.busy ? "disabled" : ""}>Save matching</button></div>
+        <table class="cadmap" style="width:100%;margin-top:10px;border-collapse:collapse;font-size:13px">
+          ${C3D_ROLES.map(([std, desc]) => `<tr style="border-top:1px solid var(--line,#e5e5e5)"><td style="padding:5px 6px;font-family:ui-monospace,monospace">${std}</td><td style="padding:5px 6px;color:var(--muted,#777)">${esc(desc)}</td>
+            <td style="padding:5px 6px"><select data-std="${std}" style="width:100%">${opts(map[std])}</select></td></tr>`).join("")}
+        </table></div>` : ""}
+      <div class="card" style="padding:14px 16px">
+        <div class="row"><div><h3 style="margin:0">Drafted plugin for Civil 3D 2027</h3>
+          <div class="note">Unzip into <code>%APPDATA%\Autodesk\ApplicationPlugins\</code> and restart Civil 3D. Start a drawing from your template, run <b>DRAFTEDIMPORT</b> and pick a plan set's Civil 3D package (.zip). <b>DRAFTEDSTANDARDS</b> exports your template's layers and styles for upload here.</div></div>
+          <span class="spacer"></span><button class="btn sm" data-a="plugin">Download plugin</button></div>
+      </div>`;
+  }
+  function bindCad(main) {
+    const inp = main.querySelector("#cadFile");
+    if (inp) inp.addEventListener("change", () => inp.files[0] && uploadCad(inp.files[0]));
+  }
+  function cadMapping() {
+    const m = {}; root.querySelectorAll("select[data-std]").forEach((s) => { if (s.value) m[s.dataset.std] = s.value; }); return m;
+  }
+  async function uploadCad(file) {
+    state.busy = true; state.cadMsg = ""; renderMain();
+    try {
+      const ext = (file.name.split(".").pop() || "").toLowerCase();
+      let layers = null, styles = null;
+      if (ext === "dxf") layers = await readDxfLayers(file);
+      else if (ext === "json") {
+        const j = JSON.parse(await file.text());
+        if (j.format !== "drafted-standards") throw new Error("That .json is not from DRAFTEDSTANDARDS.");
+        layers = j.layers || []; styles = j.styles || {};
+      }
+      if (file.size > 200e6) throw new Error("That file is over 200 MB.");
+      const up = await api({ action: "cad_template_upload", file_name: file.name });
+      const { error } = await sb.storage.from("pipeline").uploadToSignedUrl(up.path, up.token, file);
+      if (error) throw error;
+      const body = { action: "cad_template_save", file_name: file.name, file_path: up.path, file_kind: ext };
+      if (layers) { body.layers = layers; body.mapping = c3dAutoMap(layers); }
+      if (styles) body.styles = styles;
+      if (!layers && state.cad?.tpl?.layers?.length) { body.layers = []; body.mapping = {}; }
+      await api(body);
+      state.cadMsg = layers ? `Read ${layers.length} layers from ${file.name} and matched ${Object.keys(body.mapping).length} of Drafted's ${C3D_ROLES.length}. Check the matches below and save.`
+                            : `${file.name} saved. Layers are matched inside Civil 3D when you import (or upload a .dxf / DRAFTEDSTANDARDS .json to match them here).`;
+    } catch (e) { state.cadMsg = ""; state.cad = { ...(state.cad || {}), error: e.message }; }
+    state.busy = false; await loadCadTemplate();
+  }
+  async function saveCad(auto) {
+    state.busy = true; renderMain();
+    try {
+      const layers = state.cad?.tpl?.layers || [];
+      const mapping = auto ? c3dAutoMap(layers) : cadMapping();
+      await api({ action: "cad_template_save", mapping });
+      state.cadMsg = auto ? "Matched again from the layer names. Saved." : "Layer matching saved.";
+    } catch (e) { state.cadMsg = e.message; }
+    state.busy = false; await loadCadTemplate();
+  }
+  async function downloadPlugin() {
+    try { const r = await api({ action: "plugin_url" }); window.open(r.url, "_blank", "noopener"); }
+    catch (e) { state.error = e.message; renderMain(); }
   }
 
   // ------------------------------------------------------------- views
@@ -851,7 +996,12 @@
           <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:6px">${Object.keys(f.design || {}).map(k => (k.match(/^sheet_(.+)\.png$/) || [])[1]).filter(Boolean).sort((a, b) => { const o = ["T1","C1","C2","C3","C4","C5","C5A","C6","C7","C8","C9"]; const ka = a.split(".")[0], kb = b.split(".")[0]; return (o.indexOf(ka) - o.indexOf(kb)) || a.localeCompare(b, undefined, { numeric: true }); }).map(n => `<a class="btn sm" href="${f.design[`sheet_${n}.png`]}" target="_blank" rel="noopener">${n}</a>`).join("")}</div>
           ${f.design?.["design.dxf"] || f.design?.["surfaces_pipes.xml"] ? `<div class="row" style="margin-top:8px;flex-wrap:wrap;gap:6px">
             ${f.design?.["design.dxf"] ? `<a class="btn sm" href="${f.design["design.dxf"]}" download="${esc(fileName(j, "Design", "dxf"))}" target="_blank" rel="noopener">Design DXF</a>` : ""}
-            ${f.design?.["surfaces_pipes.xml"] ? `<a class="btn sm" href="${f.design["surfaces_pipes.xml"]}" download="${esc(fileName(j, "Surfaces and Pipes LandXML", "xml"))}" target="_blank" rel="noopener">LandXML (surfaces + pipes)</a>` : ""}</div>` : ""}` : ""}
+            ${f.design?.["surfaces_pipes.xml"] ? `<a class="btn sm" href="${f.design["surfaces_pipes.xml"]}" download="${esc(fileName(j, "Surfaces and Pipes LandXML", "xml"))}" target="_blank" rel="noopener">LandXML (surfaces + pipes)</a>` : ""}</div>` : ""}
+          <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:6px;align-items:center">
+            ${f.design?.["drafted_c3d.zip"] && ds.c3d_status !== "building" ? `<a class="btn sm primary" href="${f.design["drafted_c3d.zip"]}" download="${esc(fileName(j, "Civil 3D", "zip"))}" target="_blank" rel="noopener" title="Run DRAFTEDIMPORT in Civil 3D 2027 and pick this zip">Civil 3D package (.zip)</a>` : ""}
+            ${ds.c3d_status === "building" ? `<span class="note">Rebuilding the Civil 3D package…</span>` : f.design?.["design_x.pkl"] ? `<button class="btn sm ghost" data-a="c3dexport" ${state.busy ? "disabled" : ""} title="Rebuild only the CAD files with your current Civil 3D template">Rebuild Civil 3D package</button>` : ""}
+            <span class="note">${ds.c3d_template ? "Layers: " + esc(ds.c3d_template) : `Drafted layers · <a href="#" data-a="cad">set your Civil 3D template</a>`}</span>
+            ${ds.c3d_status === "failed" ? `<span class="note" style="color:#c33">CAD package failed${ds.c3d_error ? ": " + esc(ds.c3d_error) : ""}</span>` : ""}</div>` : ""}
         ${j.design_status === "failed" ? `<div class="err-box" style="margin-top:10px">Plan set failed: ${esc(j.design_error || "unknown error")}</div>` : ""}
       </div>`;
     return `${pkgCard}${pvCard}${designCard}${renderCard}
@@ -980,6 +1130,12 @@
     if (t.classList.contains("cand")) return;
     switch (a) {
       case "signout": await sb.auth.signOut(); break;
+      case "cad": state.view = "cad"; state.jobId = null; state.job = null; state.batchId = null; state.error = ""; state.cadMsg = ""; state.cad = null; clearTimeout(pollTimer); history.replaceState(null, "", "#"); renderSide(); renderMain(); break;
+      case "cadsave": saveCad(false); break;
+      case "cadauto": saveCad(true); break;
+      case "caddelete": if (confirm("Remove the Civil 3D template? Exports go back to Drafted's layer names.")) { state.busy = true; renderMain(); try { await api({ action: "cad_template_delete" }); state.cadMsg = "Template removed."; } catch (e) { state.cadMsg = e.message; } state.busy = false; await loadCadTemplate(); } break;
+      case "plugin": downloadPlugin(); break;
+      case "c3dexport": act({ action: "c3d_export", job_id: state.jobId }); break;
       case "new": state.view = "new"; state.batchId = null; state.jobId = null; state.job = null; state.error = ""; history.replaceState(null, "", "#"); clearTimeout(pollTimer); render(); break;
       case "open": openJob(t.dataset.id); renderSide(); break;
       case "openbatch": openBatch(t.dataset.id); break;
