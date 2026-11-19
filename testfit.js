@@ -472,6 +472,7 @@
         ${bar(D.imp, L.max_impervious_pct, "Impervious (est.)", (v) => (+v).toFixed(1) + "%")}
         <div class="tf-kv"><span>Pond</span><b>${D.pondSF ? num(D.pondSF) + " SF" : S.autoPond ? "auto" : "none"} <small>~${num(D.pondNeed)} SF est.</small></b></div>
         <label class="tf-chk"><input type="checkbox" data-g="autoPond" ${S.autoPond ? "checked" : ""}> Place a pond automatically when none is drawn</label>
+        <div class="tf-note">This is a sketch. The concept plan keeps your building footprints and positions and each parking field's position, size and orientation, then draws the driveways, curb returns, cross aisles, end islands, walks, landscaping and pond to standard, so its stall count can come in a little under the sketch.</div>
         ${D.warn.length ? `<div class="tf-warns">${D.warn.map((w) => `<div>${esc(w)}</div>`).join("")}</div>` : `<div class="tf-oklist">No issues found</div>`}
         <div class="tf-sel">${sel || `<div class="tf-note">Select something to edit its size, rotation and details.</div>`}</div>
         ${pb ? `<h4>Program</h4>${pb}` : ""}
