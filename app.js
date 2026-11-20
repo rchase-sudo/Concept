@@ -136,6 +136,7 @@
     if (k.package_status === "completed") return { phase: "done", text: "Package ready" };
     if (k.package_status === "failed") return { phase: "error", text: "Package failed" };
     if (k.package_status) return { phase: "running", text: "Writing the package" };
+    if (k.status === "layout_approved" && !k.render_status) return { phase: "done", text: "Approved" };   // Redline imports: no render unless asked
     if (k.status === "layout_approved") return { phase: "running", text: k.render_status === "failed" ? "Render failed" : "Rendering" };
     return { phase: k.render_status === "failed" ? "error" : "running", text: LABEL[k.status] || k.status };
   }
@@ -933,7 +934,8 @@
       nanobanana: "Nano Banana is rendering the photoreal view", compositing: "Keeping the photoreal pass to your lot", failed: "Render failed", completed: "Render ready" }[j.render_status] || "";
     if (renderImg) dls.unshift(["Render (photoreal)", renderImg, fileName(j, "Render", R["render.jpg"] ? "jpg" : "png")]);
     if (model) dls.push(["3D model view", model, fileName(j, "3D Model", "png")]);
-    const renderCard = !approved ? "" : `
+    // no render was asked for (a Redline import without the rendering box): no card, nothing runs
+    const renderCard = !approved || (!j.render_status && !renderImg) ? "" : `
       <div class="card" style="padding:12px;margin-bottom:16px">
         ${renderImg ? `<img class="plan" src="${renderImg}" data-a="zoom" data-src="${renderImg}" alt="Render">` :
           j.render_status === "failed" ? `<div class="err-box">Render failed: ${esc(j.render_error || "unknown error")}</div>` :
@@ -1006,7 +1008,7 @@
         ${j.design_status === "failed" ? `<div class="err-box" style="margin-top:10px">Plan set failed: ${esc(j.design_error || "unknown error")}</div>` : ""}
       </div>`;
     return `${pkgCard}${pvCard}${designCard}${renderCard}
-      <div class="card" style="padding:12px">${png ? `<img class="plan" src="${png}" data-a="zoom" data-src="${png}" alt="Concept plan">` : `<div class="note">Plan image missing.</div>`}</div>
+      ${png ? `<div class="card" style="padding:12px"><img class="plan" src="${png}" data-a="zoom" data-src="${png}" alt="Concept plan"></div>` : j.source === "redline" ? "" : `<div class="card" style="padding:12px"><div class="note">Plan image missing.</div></div>`}
       <div class="grid2" style="margin-top:16px">
         <div class="card">
           <h3>${esc(m.concept || j.program?.use || "Concept")}</h3>
